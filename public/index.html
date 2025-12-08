@@ -222,7 +222,7 @@
       <input 
         type="password" 
         id="apiKeyInput" 
-        placeholder="Enter API Key" 
+        placeholder="Enter Password" 
         autocomplete="off"
       />
       <button onclick="authenticate()" class="btn-start" style="width: 100%;">
@@ -297,7 +297,7 @@
           localStorage.setItem('apiKey', key);
           showMainApp();
         } else {
-          showAuthError('Invalid API Key');
+          showAuthError('Invalid Password');
         }
       })
       .catch(() => showAuthError('Connection failed'));
