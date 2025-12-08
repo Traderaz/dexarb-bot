@@ -100,10 +100,10 @@ class LighterOrderClient {
     const bidPrice = parseFloat(orderbookResponse.data.bids[0].price);
     const askPrice = parseFloat(orderbookResponse.data.asks[0].price);
     
-    // PREMIUM ACCOUNT: Use LIMIT orders with minimal crossing for deep Lighter orderbook
-    // Cross by only 0.001% - Lighter has deep liquidity so this is enough for instant fills
-    // Fee: 0.002% maker (minimal cost for instant execution)
-    const aggressiveFactor = side === 'buy' ? 1.00001 : 0.99999; // 0.001% aggressive (10x less than Nado)
+    // GUARANTEED FILL: Use aggressive limit orders that cross the spread significantly
+    // Cross by 0.1% to ensure instant fills even in volatile markets
+    // This guarantees execution while keeping costs reasonable
+    const aggressiveFactor = side === 'buy' ? 1.001 : 0.999; // 0.1% aggressive for guaranteed fills
     const targetPriceUSD = side === 'buy' ? askPrice * aggressiveFactor : bidPrice * aggressiveFactor;
     
     // Sign order - CORRECTED UNITS (from Lighter admin):

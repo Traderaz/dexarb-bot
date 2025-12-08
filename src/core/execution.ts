@@ -397,7 +397,16 @@ export class ExecutionManager {
     }
     
     // Wait for both to complete (fire simultaneously, don't wait for verification)
-    const [lighterResult, nadoResult] = await Promise.all([lighterPromise, nadoPromise]);
+    let lighterResult: LegExecutionResult;
+    let nadoResult: LegExecutionResult;
+    
+    try {
+      [lighterResult, nadoResult] = await Promise.all([lighterPromise, nadoPromise]);
+    } catch (error) {
+      this.logger.error(`❌ CRITICAL: One or both legs failed! Error: ${error}`);
+      this.logger.error(`⚠️  MANUAL INTERVENTION REQUIRED - Check positions on both exchanges!`);
+      throw new Error(`Spread entry failed - potential unhedged position. Check exchanges manually! ${error}`);
+    }
     
     this.logger.info(`✓ Lighter: ${lighterResult.averagePrice.toFixed(2)}, Nado: ${nadoResult.averagePrice.toFixed(2)}`);
     
