@@ -11,7 +11,7 @@ const fs = require('fs');
 
 const app = express();
 const PORT = process.env.WEB_PORT || 3000;
-const API_KEY = process.env.WEB_API_KEY || 'CHANGE_ME_IN_PRODUCTION';
+const API_KEY = process.env.WEB_PASSWORD || 'CHANGE_ME_IN_PRODUCTION';
 
 let botProcess = null;
 let botLogs = [];
