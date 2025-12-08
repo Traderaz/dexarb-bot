@@ -5,15 +5,7 @@
 
 const axios = require('axios');
 const { ethers } = require('ethers');
-const ffi = require('ffi-napi');
-const ref = require('ref-napi');
-const path = require('path');
-
-// Load Lighter FFI
-const dllPath = path.join(__dirname, 'lighter-signer-windows-amd64.dll');
-const lighterFFI = ffi.Library(dllPath, {
-  'PlaceOrder': ['string', ['string', 'string', 'int', 'int', 'string', 'string', 'int64', 'int64', 'int', 'int']]
-});
+const { placeMarketOrder } = require('./lighter-order');
 
 async function getNadoPosition() {
   try {
@@ -94,23 +86,17 @@ async function closeLighterPosition(size, currentPrice) {
   
   console.log(`Closing Lighter ${isLong ? 'LONG' : 'SHORT'} ${sizeAbs} BTC @ ~${limitPrice}`);
   
-  const orderType = 0; // LIMIT
-  const tif = 1; // GTT (Good Till Time)
-  
-  const result = lighterFFI.PlaceOrder(
+  // Use the working lighter-order.js module
+  const result = await placeMarketOrder(
     config.lighter.apiKey,
     config.lighter.apiSecret,
-    orderType,
-    side === 'buy' ? 0 : 1, // 0=buy, 1=sell
-    'BTC-PERP',
-    (sizeAbs * 1e8).toString(), // Convert to satoshis
-    Math.floor(limitPrice * 1e10), // Price in Lighter units
-    Math.floor(Date.now() / 1000) + 300, // GTT: 5 minutes
-    tif,
-    0 // Post-only: false
+    side,
+    sizeAbs,
+    limitPrice,
+    currentPrice
   );
   
-  return JSON.parse(result);
+  return result;
 }
 
 async function getNadoPrice() {
