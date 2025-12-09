@@ -10,6 +10,7 @@ import { BotStateManager } from './state';
 // import { FundingManager } from './funding'; // Disabled - funding check removed
 import { ExecutionManager } from './execution';
 import { RiskManager } from './risk';
+import { TradeLogger, CompletedTrade } from './trade-logger';
 
 export class BasisTradingStrategy {
   private config: BotConfig;
@@ -18,6 +19,7 @@ export class BasisTradingStrategy {
   // private _fundingManager: FundingManager; // Unused - funding check disabled
   private executionManager: ExecutionManager;
   private riskManager: RiskManager;
+  private tradeLogger: TradeLogger;
   private nadoExchange: IExchange;
   private lighterExchange: IExchange;
   private symbol: string;
@@ -46,6 +48,7 @@ export class BasisTradingStrategy {
       config.fees?.lighterTakerFeeBps || 0.2
     );
     this.riskManager = new RiskManager(config, logger);
+    this.tradeLogger = new TradeLogger(logger);
   }
   
   /**
@@ -506,16 +509,68 @@ export class BasisTradingStrategy {
       const realizedPnlUsd = longPnl + shortPnl;
       const realizedPnlBtc = realizedPnlUsd / ((position.cheapExchangePrice + position.expensiveExchangePrice) / 2);
       
+      // Calculate actual fees based on maker/taker usage
+      // Entry fees: Nado uses maker (limit), Lighter uses market (taker but 0% fee)
+      const nadoEntryFee = (this.config.fees.nadoMakerFeeBps / 10000) * 
+        (position.cheapExchange === 'nado' ? position.cheapExchangePrice : position.expensiveExchangePrice) * 
+        this.config.positionSizeBtc;
+      const lighterEntryFee = 0; // Lighter market orders are free
+      const entryFeesUsd = nadoEntryFee + lighterEntryFee;
+      
+      // Exit fees (calculate based on actual execution)
+      const exitLongFee = result.longLeg.exchange === 'Lighter' 
+        ? 0 // Lighter market orders are free (0% taker)
+        : (result.longLeg.usedMaker ? this.config.fees.nadoMakerFeeBps : this.config.fees.nadoTakerFeeBps) / 10000 * result.longLeg.averagePrice * this.config.positionSizeBtc;
+      
+      const exitShortFee = result.shortLeg.exchange === 'Lighter'
+        ? 0 // Lighter market orders are free (0% taker)
+        : (result.shortLeg.usedMaker ? this.config.fees.nadoMakerFeeBps : this.config.fees.nadoTakerFeeBps) / 10000 * result.shortLeg.averagePrice * this.config.positionSizeBtc;
+      
+      const exitFeesUsd = exitLongFee + exitShortFee;
+      const totalFeesUsd = entryFeesUsd + exitFeesUsd;
+      
       // Close the position in state
       this.stateManager.closePosition(exitGapUsd, realizedPnlBtc);
+      
+      // Log completed trade to disk with fees
+      const trade: CompletedTrade = {
+        id: `trade-${position.entryTimestamp}`,
+        entryTimestamp: position.entryTimestamp,
+        exitTimestamp: Date.now(),
+        entryGapUsd: position.entryGapUsd,
+        exitGapUsd,
+        cheapExchange: position.cheapExchange,
+        expensiveExchange: position.expensiveExchange,
+        positionSizeBtc: this.config.positionSizeBtc,
+        realizedPnlBtc,
+        realizedPnlUsd,
+        holdDurationSeconds: Math.floor((Date.now() - position.entryTimestamp) / 1000),
+        entryPrices: {
+          cheap: position.cheapExchangePrice,
+          expensive: position.expensiveExchangePrice
+        },
+        exitPrices: {
+          long: result.longLeg.averagePrice,
+          short: result.shortLeg.averagePrice
+        },
+        fees: {
+          entry: entryFeesUsd,
+          exit: exitFeesUsd,
+          total: totalFeesUsd
+        }
+      };
+      
+      this.tradeLogger.logTrade(trade);
       
       // RELEASE LOCK - Exit completed successfully
       this.isExecutingTrade = false;
       this.logger.info('🔓 LOCK RELEASED (EXIT) - Bot can now enter new positions');
       
+      const netPnlUsd = realizedPnlUsd - totalFeesUsd;
       this.logger.info(
         `✓ SPREAD CLOSED: Exit gap ${exitGapUsd.toFixed(2)} USD, ` +
-        `Realized PnL: ${realizedPnlBtc.toFixed(6)} BTC (~${realizedPnlUsd.toFixed(2)} USD), ` +
+        `Gross PnL: $${realizedPnlUsd.toFixed(2)}, Fees: $${totalFeesUsd.toFixed(2)}, ` +
+        `Net PnL: $${netPnlUsd.toFixed(2)}, ` +
         `Entry gap was ${position.entryGapUsd.toFixed(2)} USD`
       );
       

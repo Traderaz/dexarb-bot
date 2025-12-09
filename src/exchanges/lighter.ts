@@ -6,7 +6,7 @@
  */
 
 import axios, { AxiosInstance } from 'axios';
-const LighterOrderClient = require('../../lighter-order-sdk.js');
+const LighterOrderClient = require('../../lighter-order.js');
 import { BaseExchange } from './interface';
 import { 
   Order, 
@@ -47,12 +47,12 @@ export class LighterExchange extends BaseExchange {
       }
     });
     
-    // Initialize order client
+    // Initialize order client (FFI-based, works on Windows)
     if (!dryRun) {
       this.orderClient = new LighterOrderClient({
         apiKey: config.apiKey,
-        accountIndex: config.accountIndex,
-        apiKeyIndex: config.apiKeyIndex,
+        accountIndex: (config as any).accountIndex,
+        apiKeyIndex: (config as any).apiKeyIndex || 0,
         chainId: (config as any).chainId || 304,
         baseUrl: config.restApiUrl
       });
@@ -69,7 +69,7 @@ export class LighterExchange extends BaseExchange {
     }
     
     try {
-      // Initialize order client
+      // Initialize FFI-based order client
       if (this.orderClient) {
         await this.orderClient.initialize();
         this.logger.info(`${this.name}: Order client initialized and verified`);
@@ -250,9 +250,10 @@ export class LighterExchange extends BaseExchange {
       
       this.logger.info(`${this.name}: Placing TRUE LIMIT ${side} ${size} ${symbol} @ $${price}`);
       
-      // TRUE LIMIT ORDERS NOW WORKING! (type=0, tif=1)
-      // Fixed by correcting price_decimals: 1 unit = $0.1 (not $0.01)
-      const result = await this.orderClient.placeLimitOrder(marketId, side, size, price);
+      // TRUE LIMIT ORDERS NOW WORKING with FFI-based client!
+      // postOnly defaults to false for normal limit orders
+      const postOnly = _options?.postOnly || false;
+      const result = await this.orderClient.placeLimitOrder(marketId, side, size, price, postOnly);
       
       this.logger.info(`${this.name}: Order placed - TxHash: ${result.txHash}`);
       

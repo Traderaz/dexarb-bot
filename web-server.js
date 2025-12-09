@@ -162,6 +162,85 @@ app.get('/api/logs', (req, res) => {
   });
 });
 
+// === NEW MONITORING ENDPOINTS ===
+
+const monitoring = require('./api-monitoring-v2.js');
+
+// Get current positions
+app.get('/api/positions', async (req, res) => {
+  try {
+    const positions = await monitoring.getPositions();
+    res.json(positions);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get market data and price gap
+app.get('/api/market', async (req, res) => {
+  try {
+    const marketData = await monitoring.getMarketData();
+    res.json(marketData);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get account balances
+app.get('/api/balances', async (req, res) => {
+  try {
+    const balances = await monitoring.getBalances();
+    res.json(balances);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get hedging status
+app.get('/api/hedging', async (req, res) => {
+  try {
+    const hedgingStatus = await monitoring.getHedgingStatus();
+    res.json(hedgingStatus);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get trading statistics
+app.get('/api/stats', (req, res) => {
+  try {
+    const stats = monitoring.getTradingStats();
+    res.json(stats);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get complete dashboard data (all in one)
+app.get('/api/dashboard', async (req, res) => {
+  try {
+    const [positions, marketData, balances, hedgingStatus, stats] = await Promise.all([
+      monitoring.getPositions(),
+      monitoring.getMarketData(),
+      monitoring.getBalances(),
+      monitoring.getHedgingStatus(),
+      Promise.resolve(monitoring.getTradingStats())
+    ]);
+
+    res.json({
+      timestamp: new Date().toISOString(),
+      botRunning: botProcess !== null,
+      positions,
+      marketData,
+      balances,
+      hedgingStatus,
+      stats
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });

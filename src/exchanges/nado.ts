@@ -789,48 +789,82 @@ export class NadoExchange extends BaseExchange {
     if (this.dryRun) {
       return [];
     }
-    
-    if (!this.nadoClient || !this.accountAddress) {
-      throw new Error('Nado client not initialized');
+
+    if (!this.senderHash) {
+      throw new Error('Nado client not initialized - sender hash missing');
     }
 
     try {
-      // Get subaccount summary which includes position information
-      const summary = await this.nadoClient.context.engineClient.getSubaccountSummary({
-        subaccountOwner: this.accountAddress,
-        subaccountName: 'default',
-      } as any);
+      // Use REST API query with the correct sender hash format
+      // Sender = wallet address + subaccount name in hex, padded right with zeros
+      const axios = (await import('axios')).default;
+      const response = await axios.post(`${this.gatewayApiUrl}/v1/query`, {
+        type: 'subaccount_info',
+        subaccount: this.senderHash
+      }, {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 10000
+      });
+
+      const data = response.data?.data;
+      if (!data || !data.exists) {
+        this.logger.info(`${this.name}: Subaccount does not exist or has no data`);
+        return [];
+      }
 
       const positions: Position[] = [];
-
-      // Process perp balances
-      const summaryData = summary as any;
-      if (summaryData.perp || summaryData.perpBalances) {
-        const perpBalances = summaryData.perp || summaryData.perpBalances || [];
-        for (const perpBalance of perpBalances) {
-          const amount = parseFloat(String(perpBalance.amount || 0));
-          if (Math.abs(amount) > 0.0001) { // Only include non-zero positions
-            const symbol = this.productIdToSymbol(perpBalance.productId);
-            const markPrice = parseFloat(String(perpBalance.vQuoteBalance || 0)) / amount;
+      
+      // Parse perp_balances array (new REST API format)
+      if (data.perp_balances && Array.isArray(data.perp_balances)) {
+        for (const perpBalance of data.perp_balances) {
+          // Amount is in wei-like units (18 decimals)
+          const amountWei = BigInt(perpBalance.balance?.amount || '0');
+          const amount = Number(amountWei) / 1e18;
+          
+          // vQuoteBalance is also in wei-like units
+          const vQuoteBalanceWei = BigInt(perpBalance.balance?.v_quote_balance || '0');
+          const vQuoteBalance = Number(vQuoteBalanceWei) / 1e18;
+          
+          if (Math.abs(amount) > 0.0001) {
+            const productId = perpBalance.product_id;
+            const symbol = this.productIdToSymbol(productId);
+            
+            // Calculate mark price from vQuoteBalance and amount
+            // vQuoteBalance is negative of (amount * entry_price)
+            const entryPrice = amount !== 0 ? Math.abs(vQuoteBalance / amount) : 0;
+            
+            // Get current market price for unrealized PnL calculation
+            let markPrice = entryPrice;
+            try {
+              const marketData = await this.getMarketData(symbol);
+              markPrice = marketData.midPrice;
+            } catch (error) {
+              this.logger.warn(`${this.name}: Could not fetch mark price, using entry price`);
+            }
+            
+            // Calculate unrealized PnL
+            const unrealizedPnl = amount * (markPrice - entryPrice);
             
             positions.push({
               symbol,
               side: amount > 0 ? 'long' : 'short',
               size: Math.abs(amount),
-              entryPrice: markPrice, // Approximate
+              entryPrice,
               markPrice,
-              unrealizedPnl: parseFloat(String(perpBalance.vQuoteBalance || 0)),
-              leverage: 1, // TODO: Calculate actual leverage
-              margin: 0, // TODO: Calculate actual margin
+              unrealizedPnl,
+              leverage: 1,
+              margin: 0,
             });
+            
+            this.logger.info(`${this.name}: Found position: ${symbol} ${amount > 0 ? 'LONG' : 'SHORT'} ${Math.abs(amount)} BTC at $${entryPrice.toFixed(2)}`);
           }
         }
       }
 
       return positions;
-    } catch (error) {
-      this.logger.error(`${this.name}: Failed to get open positions: ${error}`);
-      throw error;
+    } catch (error: any) {
+      this.logger.error(`${this.name}: Failed to get open positions: ${error.message || error}`);
+      return [];
     }
   }
   
