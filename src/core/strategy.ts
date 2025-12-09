@@ -386,6 +386,12 @@ export class BasisTradingStrategy {
    * Evaluate conditions for closing the current spread trade.
    */
   private async evaluateExit(): Promise<void> {
+    // SAFETY CHECK: LOCK - Don't evaluate exit if another trade is executing
+    if (this.isExecutingTrade) {
+      this.logger.debug('🔒 Trade execution in progress - skipping exit evaluation');
+      return;
+    }
+    
     const position = this.stateManager.getCurrentPosition();
     if (!position) {
       this.logger.error('evaluateExit called but no position exists');
@@ -471,6 +477,10 @@ export class BasisTradingStrategy {
       return;
     }
     
+    // SET LOCK - Prevent concurrent trade execution (including new entries during exit)
+    this.isExecutingTrade = true;
+    this.logger.info('🔒 LOCK ACQUIRED (EXIT) - No new trades until exit completes');
+    
     try {
       const result = await this.executionManager.executeSpreadExit(
         longExchange,
@@ -499,6 +509,10 @@ export class BasisTradingStrategy {
       // Close the position in state
       this.stateManager.closePosition(exitGapUsd, realizedPnlBtc);
       
+      // RELEASE LOCK - Exit completed successfully
+      this.isExecutingTrade = false;
+      this.logger.info('🔓 LOCK RELEASED (EXIT) - Bot can now enter new positions');
+      
       this.logger.info(
         `✓ SPREAD CLOSED: Exit gap ${exitGapUsd.toFixed(2)} USD, ` +
         `Realized PnL: ${realizedPnlBtc.toFixed(6)} BTC (~${realizedPnlUsd.toFixed(2)} USD), ` +
@@ -507,6 +521,10 @@ export class BasisTradingStrategy {
       
     } catch (error) {
       this.logger.error(`FAILED TO EXECUTE EXIT: ${error}`);
+      
+      // RELEASE LOCK on error too
+      this.isExecutingTrade = false;
+      this.logger.warn('🔓 LOCK RELEASED (exit error occurred)');
       
       // This is critical - we need to keep trying to close or alert the operator
       this.logger.error(

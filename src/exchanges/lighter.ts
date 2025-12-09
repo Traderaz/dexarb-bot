@@ -6,7 +6,7 @@
  */
 
 import axios, { AxiosInstance } from 'axios';
-const LighterOrderClient = require('../../lighter-order.js');
+const LighterOrderClient = require('../../lighter-order-sdk.js');
 import { BaseExchange } from './interface';
 import { 
   Order, 
@@ -24,6 +24,7 @@ export class LighterExchange extends BaseExchange {
   private dryRun: boolean;
   private lastMarketData: Map<string, MarketData> = new Map();
   private orderClient: any;
+  private config: ExchangeConfig;
   
   // Lighter market ID mapping (symbol -> market_id)
   private static readonly MARKET_IDS: Record<string, number> = {
@@ -36,6 +37,7 @@ export class LighterExchange extends BaseExchange {
   constructor(config: ExchangeConfig, logger: Logger, dryRun: boolean = false) {
     super('Lighter', logger);
     this.dryRun = dryRun;
+    this.config = config;
     
     this.httpClient = axios.create({
       baseURL: config.restApiUrl,
@@ -362,7 +364,7 @@ export class LighterExchange extends BaseExchange {
     };
   }
   
-  async getPosition(symbol: string): Promise<Position> {
+  async getPosition(symbol: string): Promise<Position | null> {
     if (this.dryRun) {
       return {
         symbol,
@@ -376,21 +378,59 @@ export class LighterExchange extends BaseExchange {
       };
     }
     
-    // Get position from API
-    return {
-      symbol,
-      side: 'long',
-      size: 0,
-      entryPrice: 0,
-      markPrice: await this.getMarkPrice(symbol),
-      unrealizedPnl: 0,
-      margin: 0,
-      leverage: 1
-    };
+    const positions = await this.getOpenPositions();
+    return positions.find(p => p.symbol === symbol) || null;
   }
   
   async getOpenPositions(): Promise<Position[]> {
-    return [];
+    if (this.dryRun) {
+      return [];
+    }
+
+    try {
+      // Get account data from Lighter API
+      const response = await axios.get(`${this.config.restApiUrl}/api/v1/account`, {
+        params: {
+          by: 'index',
+          value: this.config.accountIndex
+        },
+        timeout: 10000
+      });
+
+      const account = response.data?.accounts?.[0];
+      if (!account || !account.positions) {
+        return [];
+      }
+
+      const positions: Position[] = [];
+
+      // Process positions
+      for (const pos of account.positions) {
+        const positionSize = parseFloat(pos.position || '0');
+        
+        // Only include non-zero positions
+        if (Math.abs(positionSize) > 0.0001) {
+          // market_id 1 = BTC-PERP
+          const symbol = pos.market_id === 1 ? 'BTC-PERP' : `MARKET-${pos.market_id}`;
+          
+          positions.push({
+            symbol,
+            side: positionSize > 0 ? 'long' : 'short',
+            size: Math.abs(positionSize),
+            entryPrice: parseFloat(pos.avg_entry_price || '0'),
+            markPrice: parseFloat(pos.mark_price || pos.avg_entry_price || '0'),
+            unrealizedPnl: parseFloat(pos.unrealized_pnl || '0'),
+            margin: parseFloat(pos.margin || '0'),
+            leverage: 1 // Lighter doesn't directly provide leverage in API
+          });
+        }
+      }
+
+      return positions;
+    } catch (error) {
+      this.logger.error(`${this.name}: Failed to get open positions: ${error}`);
+      throw error;
+    }
   }
   
   async getAccountInfo(): Promise<any> {
