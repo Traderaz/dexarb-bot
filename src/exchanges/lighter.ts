@@ -68,7 +68,8 @@ export class LighterExchange extends BaseExchange {
       return;
     }
     
-    try {
+    // Retry initialization in case of network issues
+    await retryWithBackoff(async () => {
       // Initialize FFI-based order client
       if (this.orderClient) {
         await this.orderClient.initialize();
@@ -76,10 +77,7 @@ export class LighterExchange extends BaseExchange {
       }
       
       this.logger.info(`${this.name}: Successfully initialized`);
-    } catch (error) {
-      this.logger.error(`${this.name}: Failed to initialize: ${error}`);
-      throw error;
-    }
+    }, { maxAttempts: 5, initialDelayMs: 2000 }, this.logger);
   }
 
   // Signing method for future use when implementing full REST API
@@ -107,7 +105,7 @@ export class LighterExchange extends BaseExchange {
       return cached;
     }
     
-    try {
+    return retryWithBackoff(async () => {
       const marketId = LighterExchange.MARKET_IDS[symbol];
       if (marketId === undefined) {
         throw new Error(`Unknown symbol ${symbol} for Lighter exchange`);
@@ -155,10 +153,7 @@ export class LighterExchange extends BaseExchange {
       }
       
       throw new Error(`Invalid market data from Lighter: bid=${bidPrice}, ask=${askPrice}`);
-    } catch (error: any) {
-      this.logger.error(`${this.name}: Failed to get market data for ${symbol}: ${error.message || error}`);
-      throw error;
-    }
+    }, {}, this.logger);
   }
   
   async getFundingRate(symbol: string): Promise<FundingRate> {

@@ -487,9 +487,9 @@ export class ExecutionManager {
         };
       });
     } else {
-      // Nado is long - LIMIT SELL to close
-      this.logger.info(`Nado: LIMIT SELL ${size} BTC @ ${longExitPrice.toFixed(2)} (close long)`);
-      longLeg = this.executeLeg(longExchange, symbol, 'sell', size, longExitPrice, timeoutMs, false, 0, 5, true);
+      // Nado is long - AGGRESSIVE LIMIT SELL with TAKER FALLBACK to guarantee fill
+      this.logger.info(`Nado: AGGRESSIVE LIMIT SELL ${size} BTC @ ${longExitPrice.toFixed(2)} (close long) - will use market if needed`);
+      longLeg = this.executeLeg(longExchange, symbol, 'sell', size, longExitPrice, timeoutMs, true, 0, 5, true);
     }
     
     if (shortExchange.name === 'Lighter') {
@@ -508,9 +508,9 @@ export class ExecutionManager {
         };
       });
     } else {
-      // Nado is short - LIMIT BUY to close
-      this.logger.info(`Nado: LIMIT BUY ${size} BTC @ ${shortExitPrice.toFixed(2)} (close short)`);
-      shortLeg = this.executeLeg(shortExchange, symbol, 'buy', size, shortExitPrice, timeoutMs, false, 0, 5, true);
+      // Nado is short - AGGRESSIVE LIMIT BUY with TAKER FALLBACK to guarantee fill
+      this.logger.info(`Nado: AGGRESSIVE LIMIT BUY ${size} BTC @ ${shortExitPrice.toFixed(2)} (close short) - will use market if needed`);
+      shortLeg = this.executeLeg(shortExchange, symbol, 'buy', size, shortExitPrice, timeoutMs, true, 0, 5, true);
     }
     
     // Fire both simultaneously, trust both fill
