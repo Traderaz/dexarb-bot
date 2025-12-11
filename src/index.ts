@@ -138,6 +138,7 @@ class TradingBot {
     let lastMarketUpdateTime = 0;
     let lastStatusLogTime = 0;
     let lastFundingCheckTime = 0;
+    let lastPositionVerifyTime = 0;
     
     while (!this.shouldStop) {
       try {
@@ -161,6 +162,12 @@ class TradingBot {
           await this.monitorFundingRates();
         }
         
+        // Periodic position verification (every 30 minutes)
+        if (now - lastPositionVerifyTime >= 1800000) { // 30 minutes
+          lastPositionVerifyTime = now;
+          await this.verifyPositions();
+        }
+        
         // Sleep to prevent tight loop
         await sleep(1000);
         
@@ -171,6 +178,61 @@ class TradingBot {
     }
     
     this.logger.info('Bot stopped');
+  }
+  
+  private async verifyPositions(): Promise<void> {
+    try {
+      this.logger.info('🔍 Performing periodic position verification...');
+      
+      // Get actual positions from exchanges
+      const [nadoPosition, lighterPosition] = await Promise.all([
+        this.nadoExchange.getPosition(SYMBOL),
+        this.lighterExchange.getPosition(SYMBOL)
+      ]);
+      
+      const actualNadoSize = Math.abs(nadoPosition?.size || 0);
+      const actualLighterSize = Math.abs(lighterPosition?.size || 0);
+      
+      // Get bot's internal state
+      const botState = this.strategy.getStatus();
+      const botThinkPositionOpen = botState.state === 'OPEN';
+      
+      // Check for mismatch
+      const hasActualPosition = actualNadoSize > 0 || actualLighterSize > 0;
+      
+      if (botThinkPositionOpen && !hasActualPosition) {
+        this.logger.error('❌ CRITICAL: Bot thinks position is OPEN but exchanges show FLAT!');
+        this.logger.error('   This could cause unhedged positions. Forcing state reset...');
+        // Force the strategy to reconcile
+        await this.strategy.initialize();
+        this.logger.info('✓ State reset complete. Bot should now be in sync.');
+      } else if (!botThinkPositionOpen && hasActualPosition) {
+        this.logger.error('❌ CRITICAL: Bot thinks FLAT but exchanges show OPEN positions!');
+        this.logger.error(`   Nado: ${actualNadoSize} BTC (${nadoPosition?.side})`);
+        this.logger.error(`   Lighter: ${actualLighterSize} BTC (${lighterPosition?.side})`);
+        this.logger.error('   Forcing position detection...');
+        await this.strategy.initialize();
+        this.logger.info('✓ Position detected. Bot will now manage exit.');
+      } else if (botThinkPositionOpen && hasActualPosition) {
+        // Both agree position is open - verify hedge is correct
+        const sizeDiff = Math.abs(actualNadoSize - actualLighterSize);
+        if (sizeDiff > 0.001) {
+          this.logger.error('❌ CRITICAL: Position size mismatch!');
+          this.logger.error(`   Nado: ${actualNadoSize} BTC, Lighter: ${actualLighterSize} BTC`);
+          this.logger.error(`   Difference: ${sizeDiff.toFixed(4)} BTC - UNHEDGED RISK!`);
+        } else if (nadoPosition?.side && lighterPosition?.side && nadoPosition.side === lighterPosition.side) {
+          this.logger.error('❌ CRITICAL: Both positions on same side - NOT HEDGED!');
+          this.logger.error(`   Nado: ${nadoPosition.side}, Lighter: ${lighterPosition.side}`);
+        } else {
+          this.logger.info('✓ Position verification passed - properly hedged');
+        }
+      } else {
+        this.logger.info('✓ Position verification passed - both flat');
+      }
+      
+    } catch (error) {
+      this.logger.error(`Failed to verify positions: ${error}`);
+    }
   }
   
   private async monitorFundingRates(): Promise<void> {
