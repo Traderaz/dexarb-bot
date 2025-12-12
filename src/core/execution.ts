@@ -410,6 +410,27 @@ export class ExecutionManager {
     
     this.logger.info(`✓ Lighter: ${lighterResult.averagePrice.toFixed(2)}, Nado: ${nadoResult.averagePrice.toFixed(2)}`);
     
+    // CRITICAL: Verify actual fills match expected
+    this.logger.info('🔍 Verifying actual fills on exchanges...');
+    await sleep(3000); // Wait 3 seconds for orders to settle
+    
+    const fillVerification = await this.verifyFills(
+      cheapExchange,
+      expensiveExchange,
+      symbol,
+      size,
+      lighterResult.filledSize,
+      nadoResult.filledSize
+    );
+    
+    if (!fillVerification.success) {
+      this.logger.error(`❌ FILL VERIFICATION FAILED: ${fillVerification.error}`);
+      this.logger.error(`⚠️  EMERGENCY: ${fillVerification.action}`);
+      throw new Error(fillVerification.error);
+    }
+    
+    this.logger.info('✅ Fill verification passed - positions match expected');
+    
     const [expensiveLeg, cheapResult] = isNadoCheap ? [lighterResult, nadoResult] : [nadoResult, lighterResult];
     
     // Calculate P&L
@@ -543,6 +564,96 @@ export class ExecutionManager {
     );
     
     return { longLeg: longResult, shortLeg: shortResult };
+  }
+  
+  /**
+   * Verify that actual positions on exchanges match expected fills
+   * CRITICAL SAFETY CHECK to prevent unhedged positions from partial fills
+   */
+  private async verifyFills(
+    cheapExchange: IExchange,
+    expensiveExchange: IExchange,
+    symbol: string,
+    expectedSize: number,
+    lighterReportedFill: number,
+    nadoReportedFill: number
+  ): Promise<{
+    success: boolean;
+    error?: string;
+    action?: string;
+  }> {
+    try {
+      // Get actual positions from both exchanges
+      const [cheapPosition, expensivePosition] = await Promise.all([
+        cheapExchange.getPosition(symbol),
+        expensiveExchange.getPosition(symbol)
+      ]);
+      
+      const cheapActualSize = Math.abs(cheapPosition?.size || 0);
+      const expensiveActualSize = Math.abs(expensivePosition?.size || 0);
+      
+      const tolerance = 0.0001; // 0.01% tolerance for rounding
+      
+      // Check if both positions exist and match expected size
+      const cheapSizeOk = Math.abs(cheapActualSize - expectedSize) < tolerance;
+      const expensiveSizeOk = Math.abs(expensiveActualSize - expectedSize) < tolerance;
+      
+      if (cheapSizeOk && expensiveSizeOk) {
+        // Perfect - both sides filled as expected
+        return { success: true };
+      }
+      
+      // Something went wrong - detailed diagnostics
+      this.logger.error('❌ FILL MISMATCH DETECTED:');
+      this.logger.error(`   Expected: ${expectedSize} BTC on each side`);
+      this.logger.error(`   ${cheapExchange.name} actual: ${cheapActualSize} BTC (reported: ${lighterReportedFill})`);
+      this.logger.error(`   ${expensiveExchange.name} actual: ${expensiveActualSize} BTC (reported: ${nadoReportedFill})`);
+      
+      // Determine the problem
+      let error = '';
+      let action = '';
+      
+      if (cheapActualSize === 0 && expensiveActualSize === 0) {
+        error = 'CRITICAL: NO FILLS on either exchange - orders may have failed';
+        action = 'Check exchange UIs manually. No positions to close.';
+      } else if (cheapActualSize === 0 && expensiveActualSize > 0) {
+        error = `CRITICAL: Only ${expensiveExchange.name} filled (${expensiveActualSize} BTC) - UNHEDGED!`;
+        action = `MANUALLY CLOSE ${expensiveActualSize} BTC on ${expensiveExchange.name} immediately!`;
+      } else if (cheapActualSize > 0 && expensiveActualSize === 0) {
+        error = `CRITICAL: Only ${cheapExchange.name} filled (${cheapActualSize} BTC) - UNHEDGED!`;
+        action = `MANUALLY CLOSE ${cheapActualSize} BTC on ${cheapExchange.name} immediately!`;
+      } else if (Math.abs(cheapActualSize - expensiveActualSize) > tolerance) {
+        const diff = Math.abs(cheapActualSize - expensiveActualSize);
+        error = `CRITICAL: Size mismatch - ${cheapExchange.name}: ${cheapActualSize}, ${expensiveExchange.name}: ${expensiveActualSize}`;
+        action = `PARTIAL FILL DETECTED! Difference: ${diff.toFixed(4)} BTC. Check exchanges and close manually.`;
+      } else if (cheapActualSize < expectedSize * 0.5) {
+        // Both filled but way less than expected (< 50%)
+        error = `WARNING: Both sides only partially filled (~${((cheapActualSize / expectedSize) * 100).toFixed(1)}%)`;
+        action = `Positions are hedged but smaller than expected. Monitor for exit.`;
+        // This is actually OK - still hedged, just smaller
+        return { success: true };
+      } else {
+        // Both filled, sizes match each other, but don't match expected
+        // This could be OK if they're close
+        error = `INFO: Fill sizes differ from expected but are hedged`;
+        action = `${cheapExchange.name}: ${cheapActualSize}, ${expensiveExchange.name}: ${expensiveActualSize}. Monitoring.`;
+        return { success: true }; // Still hedged, acceptable
+      }
+      
+      return {
+        success: false,
+        error,
+        action
+      };
+      
+    } catch (error) {
+      this.logger.error(`Failed to verify fills: ${error}`);
+      return {
+        success: false,
+        error: `Fill verification check failed: ${error}`,
+        action: 'Check positions manually on both exchanges!'
+      };
+    }
   }
 }
 
