@@ -188,17 +188,83 @@ export class BasisTradingStrategy {
     if (nadoSize > 0.001 || lighterSize > 0.001) {
       this.logger.warn('⚠️  Cannot open new position - existing positions detected:');
       this.logger.warn(`   Nado: ${nadoSize} BTC, Lighter: ${lighterSize} BTC`);
-      this.logger.warn('   Switching to OPEN state to manage existing positions');
       
-      // Force state to OPEN to manage these positions
+      // CRITICAL: Check if BOTH positions exist (hedged) or only ONE (unhedged)
+      const onlyNado = nadoSize > 0.001 && lighterSize < 0.001;
+      const onlyLighter = lighterSize > 0.001 && nadoSize < 0.001;
+      
+      if (onlyNado || onlyLighter) {
+        // UNHEDGED POSITION DETECTED - AUTO-CLOSE IT
+        this.logger.error('🚨 CRITICAL: UNHEDGED POSITION DETECTED!');
+        this.logger.error(`   Only ${onlyNado ? 'Nado' : 'Lighter'} has a position!`);
+        this.logger.error('   Auto-closing orphaned position to prevent losses...');
+        
+        try {
+          if (onlyNado) {
+            // Close Nado position
+            const side = nadoPosition!.side === 'long' ? 'sell' : 'buy';
+            this.logger.warn(`   Closing Nado ${nadoPosition!.side.toUpperCase()} ${nadoSize} BTC with market order...`);
+            await this.nadoExchange.placeMarketOrder(this.symbol, side, nadoSize);
+            this.logger.info('   ✓ Nado orphaned position closed');
+          } else {
+            // Close Lighter position
+            const side = lighterPosition!.side === 'long' ? 'sell' : 'buy';
+            this.logger.warn(`   Closing Lighter ${lighterPosition!.side.toUpperCase()} ${lighterSize} BTC with market order...`);
+            await this.lighterExchange.placeMarketOrder(this.symbol, side, lighterSize);
+            this.logger.info('   ✓ Lighter orphaned position closed');
+          }
+          
+          this.logger.info('✅ Orphaned position closed - bot can now trade normally');
+          return;
+          
+        } catch (error) {
+          this.logger.error(`❌ FAILED to auto-close orphaned position: ${error}`);
+          this.logger.error('   MANUAL INTERVENTION REQUIRED - Close positions manually!');
+          throw new Error('Unhedged position detected and auto-close failed');
+        }
+      }
+      
+      // Both positions exist - reconstruct state
+      this.logger.warn('   Both positions exist - switching to OPEN state to manage them');
+      
+      // Verify positions are actually hedged (opposite sides)
+      const nadoSide = nadoPosition!.side;
+      const lighterSide = lighterPosition!.side;
+      
+      if (nadoSide === lighterSide) {
+        this.logger.error('🚨 CRITICAL: Both positions are on the SAME SIDE!');
+        this.logger.error(`   Nado: ${nadoSide.toUpperCase()}, Lighter: ${lighterSide.toUpperCase()}`);
+        this.logger.error('   This is NOT hedged! Closing both positions...');
+        
+        try {
+          const nadoCloseSide = nadoSide === 'long' ? 'sell' : 'buy';
+          const lighterCloseSide = lighterSide === 'long' ? 'sell' : 'buy';
+          
+          await Promise.all([
+            this.nadoExchange.placeMarketOrder(this.symbol, nadoCloseSide, nadoSize),
+            this.lighterExchange.placeMarketOrder(this.symbol, lighterCloseSide, lighterSize)
+          ]);
+          
+          this.logger.info('✅ Both same-side positions closed');
+          return;
+          
+        } catch (error) {
+          this.logger.error(`❌ FAILED to close same-side positions: ${error}`);
+          throw new Error('Same-side positions detected and auto-close failed');
+        }
+      }
+      
+      // Positions are properly hedged - reconstruct state
       const [nadoData, lighterData] = await Promise.all([
         this.nadoExchange.getMarketData(this.symbol),
         this.lighterExchange.getMarketData(this.symbol)
       ]);
       
       const gap = Math.abs(nadoData.midPrice - lighterData.midPrice);
-      const cheapEx = nadoData.midPrice < lighterData.midPrice ? 'nado' : 'lighter';
-      const expEx = nadoData.midPrice < lighterData.midPrice ? 'lighter' : 'nado';
+      
+      // Determine which is long and which is short based on ACTUAL positions
+      const cheapEx = nadoSide === 'long' ? 'nado' : 'lighter';
+      const expEx = nadoSide === 'long' ? 'lighter' : 'nado';
       
       this.stateManager.openPosition(
         gap,
@@ -209,6 +275,7 @@ export class BasisTradingStrategy {
         lighterData.midPrice
       );
       
+      this.logger.info(`✓ State reconstructed: LONG on ${cheapEx}, SHORT on ${expEx}`);
       return;
     }
     
