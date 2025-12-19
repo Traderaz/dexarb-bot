@@ -337,12 +337,20 @@ export class BasisTradingStrategy {
       `(${cheapExchangeName}: buy@${cheapBuyPrice.toFixed(2)}, ${expensiveExchangeName}: sell@${expensiveSellPrice.toFixed(2)})`
     );
     
-    // Check 1: Gap threshold
+    // Check 1: Gap threshold (minimum)
     if (gapUsd < this.config.entryGapUsd) {
       return;
     }
     
     this.logger.info(`GAP DETECTED: ${gapUsd.toFixed(2)} USD >= ${this.config.entryGapUsd} USD threshold`);
+    
+    // Check 1b: Gap threshold (maximum) - skip extremely volatile gaps
+    const maxGap = (this.config as any).maxEntryGapUsd || 999999;
+    if (gapUsd > maxGap) {
+      this.logger.warn(`⚠️  GAP TOO LARGE: ${gapUsd.toFixed(2)} USD > ${maxGap} USD max threshold`);
+      this.logger.warn(`   Skipping trade - gap indicates extreme volatility and high risk of partial fills`);
+      return;
+    }
     
     // Check 2: Funding rate check (DISABLED - user requested to ignore funding)
     this.logger.info(`Funding check SKIPPED (disabled by user)`);
