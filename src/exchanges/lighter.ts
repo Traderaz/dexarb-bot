@@ -50,7 +50,8 @@ export class LighterExchange extends BaseExchange {
     // Initialize order client (FFI-based, works on Windows)
     if (!dryRun) {
       this.orderClient = new LighterOrderClient({
-        apiKey: config.apiKey,
+        apiPrivateKey: (config as any).apiPrivateKey,
+        apiPublicKey: (config as any).apiPublicKey,
         accountIndex: (config as any).accountIndex,
         apiKeyIndex: (config as any).apiKeyIndex || 0,
         chainId: (config as any).chainId || 304,
@@ -139,16 +140,21 @@ export class LighterExchange extends BaseExchange {
       }
       
       if (bidPrice > 0 && askPrice > 0) {
+        // CRITICAL FIX: Lighter API returns inverted bid/ask (bid > ask)
+        // Swap them so bid is always lower than ask
+        const actualBid = Math.min(bidPrice, askPrice);
+        const actualAsk = Math.max(bidPrice, askPrice);
+        
         const marketData: MarketData = {
           symbol,
-          bidPrice,
-          askPrice,
-          midPrice: (bidPrice + askPrice) / 2,
+          bidPrice: actualBid,
+          askPrice: actualAsk,
+          midPrice: (actualBid + actualAsk) / 2,
           timestamp: Date.now()
         };
         
         this.lastMarketData.set(symbol, marketData);
-        this.logger.info(`${this.name}: ✓ Market data: ${symbol} bid=${bidPrice}, ask=${askPrice}`);
+        this.logger.info(`${this.name}: ✓ Market data: ${symbol} bid=${actualBid}, ask=${actualAsk}${bidPrice > askPrice ? ' (SWAPPED - API returned inverted)' : ''}`);
         return marketData;
       }
       
@@ -403,20 +409,35 @@ export class LighterExchange extends BaseExchange {
       // Process positions
       for (const pos of account.positions) {
         const positionSize = parseFloat(pos.position || '0');
+        const positionSign = pos.sign || 1; // sign: 1 = LONG, -1 = SHORT
         
         // Only include non-zero positions
         if (Math.abs(positionSize) > 0.0001) {
-          // market_id 1 = BTC-PERP
-          const symbol = pos.market_id === 1 ? 'BTC-PERP' : `MARKET-${pos.market_id}`;
+          // Map market_id to symbol
+          let symbol = 'UNKNOWN';
+          if (pos.market_id === 0) symbol = 'ETH-PERP';
+          else if (pos.market_id === 1) symbol = 'BTC-PERP';
+          else if (pos.market_id === 2) symbol = 'SOL-PERP';
+          else if (pos.market_id === 3) symbol = 'DOGE-PERP';
+          else symbol = `MARKET-${pos.market_id}`;
+          
+          // Get current market price for mark price (since API doesn't provide mark_price)
+          let markPrice = parseFloat(pos.avg_entry_price || '0');
+          try {
+            const marketData = await this.getMarketData(symbol);
+            markPrice = marketData.midPrice;
+          } catch (error) {
+            this.logger.warn(`${this.name}: Could not fetch mark price for ${symbol}, using entry price`);
+          }
           
           positions.push({
             symbol,
-            side: positionSize > 0 ? 'long' : 'short',
+            side: positionSign > 0 ? 'long' : 'short',
             size: Math.abs(positionSize),
             entryPrice: parseFloat(pos.avg_entry_price || '0'),
-            markPrice: parseFloat(pos.mark_price || pos.avg_entry_price || '0'),
+            markPrice: markPrice,
             unrealizedPnl: parseFloat(pos.unrealized_pnl || '0'),
-            margin: parseFloat(pos.margin || '0'),
+            margin: parseFloat(pos.allocated_margin || '0'),
             leverage: 1 // Lighter doesn't directly provide leverage in API
           });
         }
@@ -433,8 +454,32 @@ export class LighterExchange extends BaseExchange {
     if (this.dryRun) {
       return { balance: 10000, availableBalance: 10000, availableMargin: 10000 };
     }
-    // For now, return reasonable values to pass margin checks
-    return { balance: 10000, availableBalance: 10000, availableMargin: 10000 };
+    
+    try {
+      const response = await axios.get(`${this.config.restApiUrl}/api/v1/account`, {
+        params: {
+          by: 'index',
+          value: this.config.accountIndex
+        },
+        timeout: 10000
+      });
+
+      const account = response.data?.accounts?.[0];
+      if (!account) {
+        throw new Error('Account not found');
+      }
+
+      return {
+        balance: parseFloat(account.total_asset_value || '0'),
+        availableBalance: parseFloat(account.available_balance || '0'),
+        availableMargin: parseFloat(account.available_balance || '0'),
+        collateral: parseFloat(account.collateral || '0')
+      };
+    } catch (error) {
+      this.logger.error(`${this.name}: Failed to get account info: ${error}`);
+      // Return safe defaults to avoid breaking the bot
+      return { balance: 10000, availableBalance: 10000, availableMargin: 10000 };
+    }
   }
   
   async close(): Promise<void> {

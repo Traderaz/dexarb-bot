@@ -24,18 +24,19 @@ const SignedTxResponse = Struct({
 
 class LighterOrderClient {
   constructor(config) {
-    this.apiKey = config.apiKey;
+    this.apiPrivateKey = config.apiPrivateKey;
+    this.apiPublicKey = config.apiPublicKey;
     this.accountIndex = config.accountIndex;
     this.apiKeyIndex = config.apiKeyIndex;
     this.chainId = config.chainId || 304;
     this.baseUrl = config.baseUrl;
     
-    // Load DLL
+    // Load DLL (Updated December 2025 - removed hint_order_index parameters)
     const dllPath = path.join(__dirname, 'lighter-signer-windows-amd64.dll');
     this.signer = ffi.Library(dllPath, {
       'CreateClient': ['string', ['string', 'string', 'int', 'int', 'int64']],
       'CheckClient': ['string', ['int', 'int64']],
-      // FFI signature - NOTE: price is 'int' not 'int64'
+      // FFI signature - Updated to match new DLL (13 params, no hint_order_index)
       'SignCreateOrder': [SignedTxResponse, [
         'int',    // market_index
         'int64',  // client_order_index  
@@ -50,8 +51,6 @@ class LighterOrderClient {
         'int64',  // nonce
         'int',    // api_key_index
         'int64',  // account_index
-        'int64',  // hint_order_index_sell
-        'int64'   // hint_order_index_buy
       ]],
     });
   }
@@ -59,7 +58,7 @@ class LighterOrderClient {
   async initialize() {
     const createErr = this.signer.CreateClient(
       this.baseUrl,
-      this.apiKey,
+      this.apiPrivateKey, // Use private key for signing
       this.chainId,
       this.apiKeyIndex,
       this.accountIndex
@@ -128,15 +127,13 @@ class LighterOrderClient {
       price,
       side === 'sell' ? 1 : 0,
       0, // LIMIT order type (type 0 = true limit)
-      0, // IOC (Immediate Or Cancel) - crosses spread for instant fill
+      1, // GTT (Good Till Time) - stays on book to ensure fill
       0, // not reduce-only
       0, // no trigger
-      0, // expiry: 0 for market orders
+      -1, // expiry: -1 for GTT (no specific expiry, relies on TIF)
       nonce,
       this.apiKeyIndex,
-      this.accountIndex, // NUMBER for int64
-      0, // hint_order_index_sell as NUMBER
-      0  // hint_order_index_buy as NUMBER
+      this.accountIndex // NUMBER for int64
     );
     
     if (signedTx.err) {
@@ -220,15 +217,13 @@ class LighterOrderClient {
       priceUnits,
       side === 'sell' ? 1 : 0,
       0, // type=0 (LIMIT) - TRUE limit order following SDK
-      1, // tif=1 (GTT - Good Till Time) - as per SDK example
+      1, // tif=1 (GTT - Good Till Time) - stays on book to ensure fill
       0, // not reduce-only
       0, // no trigger
-      -1, // expiry as NUMBER for int64
+      -1, // expiry: -1 for GTT (no specific expiry, relies on TIF)
       nonce,
       this.apiKeyIndex,
-      this.accountIndex, // NUMBER for int64
-      0, // hint_order_index_sell as NUMBER
-      0  // hint_order_index_buy as NUMBER
+      this.accountIndex // NUMBER for int64
     );
     
     if (signedTx.err) {

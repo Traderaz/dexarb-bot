@@ -86,11 +86,11 @@ function validateExchangeConfig(exchangeConfig: any, name: string): void {
   if (!exchangeConfig.wsUrl) {
     throw new Error(`${name}: wsUrl is required for WebSocket-only mode. Add the WebSocket URL to config.json`);
   }
-  if (!exchangeConfig.apiKey) {
-    throw new Error(`${name}: apiKey is required`);
-  }
-  if (!exchangeConfig.apiSecret) {
-    throw new Error(`${name}: apiSecret is required`);
+  // Support both old (apiKey/apiSecret) and new (apiPrivateKey/apiPublicKey) formats
+  const hasOldFormat = exchangeConfig.apiKey && exchangeConfig.apiSecret;
+  const hasNewFormat = exchangeConfig.apiPrivateKey && exchangeConfig.apiPublicKey;
+  if (!hasOldFormat && !hasNewFormat) {
+    throw new Error(`${name}: either apiKey/apiSecret or apiPrivateKey/apiPublicKey is required`);
   }
 }
 

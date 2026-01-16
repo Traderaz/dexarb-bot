@@ -91,7 +91,13 @@ class LighterRestClient {
    */
   async getOrderbook(symbol) {
     try {
-      const response = await this.client.get(`/v1/orderbook/${symbol}`);
+      const marketId = this.getMarketId(symbol);
+      const response = await this.client.get('/api/v1/orderBookOrders', {
+        params: {
+          market_id: marketId,
+          limit: 10
+        }
+      });
       return response.data;
     } catch (error) {
       console.error('Failed to get orderbook:', error.message);
@@ -104,15 +110,66 @@ class LighterRestClient {
    */
   async getPositions() {
     try {
-      const response = await this.client.get('/v1/positions', {
-        headers: {
-          'X-API-KEY': this.apiKey
+      const response = await this.client.get('/api/v1/account', {
+        params: {
+          by: 'index',
+          value: this.accountIndex
         }
       });
-      return response.data;
+      
+      const account = response.data?.accounts?.[0];
+      if (!account || !account.positions) {
+        return [];
+      }
+      
+      // Filter and return only non-zero positions
+      return account.positions
+        .filter(pos => Math.abs(parseFloat(pos.position || '0')) > 0.0001)
+        .map(pos => ({
+          marketId: pos.market_id,
+          symbol: pos.symbol,
+          side: (pos.sign > 0) ? 'long' : 'short',
+          size: Math.abs(parseFloat(pos.position || '0')),
+          entryPrice: parseFloat(pos.avg_entry_price || '0'),
+          unrealizedPnl: parseFloat(pos.unrealized_pnl || '0'),
+          realizedPnl: parseFloat(pos.realized_pnl || '0'),
+          margin: parseFloat(pos.allocated_margin || '0')
+        }));
     } catch (error) {
       console.error('Failed to get positions:', error.message);
       return [];
+    }
+  }
+
+  /**
+   * Get account information
+   */
+  async getAccountInfo() {
+    try {
+      const response = await this.client.get('/api/v1/account', {
+        params: {
+          by: 'index',
+          value: this.accountIndex
+        }
+      });
+      
+      const account = response.data?.accounts?.[0];
+      if (!account) {
+        throw new Error('Account not found');
+      }
+      
+      return {
+        accountIndex: account.index,
+        address: account.l1_address,
+        balance: parseFloat(account.total_asset_value || '0'),
+        availableBalance: parseFloat(account.available_balance || '0'),
+        collateral: parseFloat(account.collateral || '0'),
+        positions: account.positions || [],
+        assets: account.assets || []
+      };
+    } catch (error) {
+      console.error('Failed to get account info:', error.message);
+      throw error;
     }
   }
 
@@ -135,11 +192,12 @@ class LighterRestClient {
 
   getMarketId(symbol) {
     const markets = {
-      'BTC-PERP': 1,
       'ETH-PERP': 0,
-      'SOL-PERP': 2
+      'BTC-PERP': 1,
+      'SOL-PERP': 2,
+      'DOGE-PERP': 3
     };
-    return markets[symbol] || 1;
+    return markets[symbol] !== undefined ? markets[symbol] : 1;
   }
 }
 

@@ -61,7 +61,7 @@ async function main() {
     console.log('🔒 Closing Lighter position...');
     
     const size = parseFloat(lighterPosition.position);
-    const isLong = size > 0;
+    const isLong = lighterPosition.sign === 1; // Use sign field: 1 = LONG, -1 = SHORT
     const side = isLong ? 'sell' : 'buy';
     const sizeAbs = Math.abs(size);
     

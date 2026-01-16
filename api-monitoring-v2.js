@@ -172,11 +172,29 @@ async function getPositions() {
 
   // Calculate combined P&L with fees if both positions exist
   if (results.lighter.position?.size && results.nado.position?.size) {
+    // Get current market data for accurate mark prices (Lighter's mark price can be stale)
+    let lighterCurrentMid = results.lighter.position.markPrice;
+    let nadoCurrentMid = results.nado.position.markPrice;
+    
+    try {
+      const lighterMarket = await lighterExchange.getMarketData('BTC-PERP');
+      lighterCurrentMid = lighterMarket.midPrice;
+    } catch (error) {
+      // Fallback to position mark price if market data fetch fails
+    }
+    
+    try {
+      const nadoMarket = await nadoExchange.getMarketData('BTC-PERP');
+      nadoCurrentMid = nadoMarket.midPrice;
+    } catch (error) {
+      // Fallback to position mark price if market data fetch fails
+    }
+    
     results.pnl = calculateUnrealizedPnL(
       results.lighter.position,
       results.nado.position,
-      results.lighter.position.markPrice,
-      results.nado.position.markPrice
+      lighterCurrentMid,
+      nadoCurrentMid
     );
   }
 
