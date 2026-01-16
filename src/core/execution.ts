@@ -1,12 +1,24 @@
 /**
  * Order execution module with maker/taker fallback logic.
  * Handles placing orders, monitoring fills, and falling back to taker orders if necessary.
+ * 
+ * Supports two execution modes:
+ * - "simultaneous": Aggressive limits on both exchanges at once (current)
+ * - "sequential_maker": Nado maker first, Lighter market on fill (lower fees)
  */
 
 import { IExchange } from '../exchanges/interface';
-import { Order, OrderSide } from '../config/types';
+import { Order, OrderSide, ExecutionConfig } from '../config/types';
 import { Logger } from '../utils/logger';
 import { sleep } from '../utils/retry';
+
+// Default execution config
+const DEFAULT_EXECUTION_CONFIG: ExecutionConfig = {
+  mode: 'simultaneous',
+  nadoMakerOffsetTicks: 1,
+  nadoMakerTimeoutMs: 30000,
+  nadoFillPollIntervalMs: 100
+};
 
 export interface ExecutionResult {
   success: boolean;
@@ -29,19 +41,22 @@ export class ExecutionManager {
   private nadoTakerFeeBps: number;
   private lighterMakerFeeBps: number;
   private lighterTakerFeeBps: number;
+  private executionConfig: ExecutionConfig;
   
   constructor(
     logger: Logger,
     nadoMakerFeeBps: number = 1,
     nadoTakerFeeBps: number = 3.5,
     lighterMakerFeeBps: number = 0.2,
-    lighterTakerFeeBps: number = 0.2
+    lighterTakerFeeBps: number = 0.2,
+    executionConfig?: ExecutionConfig
   ) {
     this.logger = logger;
     this.nadoMakerFeeBps = nadoMakerFeeBps;
     this.nadoTakerFeeBps = nadoTakerFeeBps;
     this.lighterMakerFeeBps = lighterMakerFeeBps;
     this.lighterTakerFeeBps = lighterTakerFeeBps;
+    this.executionConfig = executionConfig || DEFAULT_EXECUTION_CONFIG;
   }
   
   /**
@@ -327,8 +342,12 @@ export class ExecutionManager {
   
   /**
    * Execute both legs of a spread trade:
-   * - Nado: Limit order (0.01% maker fee)
+   * - Nado: Limit order (maker fee if on book)
    * - Lighter: Market order (0% taker fee = FREE!)
+   * 
+   * Supports two modes:
+   * - "sequential_maker": Nado posts maker order first, Lighter executes on fill (lower fees)
+   * - "simultaneous": Both exchanges aggressive limit at same time (faster, higher fees)
    */
   async executeSpreadEntry(
     cheapExchange: IExchange,
@@ -347,6 +366,16 @@ export class ExecutionManager {
       `Executing spread entry: LONG ${size} on ${cheapExchange.name}, ` +
       `SHORT ${size} on ${expensiveExchange.name}`
     );
+    
+    // Check execution mode
+    if (this.executionConfig.mode === 'sequential_maker') {
+      return this.executeSpreadEntrySequential(
+        cheapExchange,
+        expensiveExchange,
+        symbol,
+        size
+      );
+    }
     
     // STRATEGY: Simultaneous aggressive limits on BOTH exchanges (0.04% aggressive pricing)
     this.logger.info(`🚀 SIMULTANEOUS: Aggressive limits on BOTH sides (0.04% aggressive)...`);
@@ -375,12 +404,15 @@ export class ExecutionManager {
       ? lighterMarket.askPrice * 1.0004  // Buy: 0.04% above ask (crosses spread)
       : lighterMarket.bidPrice * 0.9996; // Sell: 0.04% below bid (crosses spread)
     
+    // Round Lighter price to $0.10 increments (Lighter's price_decimals = 1)
+    const lighterLimitPriceRounded = Math.round(lighterLimitPrice * 10) / 10;
+    
     // Place BOTH aggressive limit orders SIMULTANEOUSLY
-    this.logger.info(`Placing aggressive limits: Nado ${nadoSide.toUpperCase()} @ ${nadoLimitPrice.toFixed(2)}, Lighter ${lighterSide.toUpperCase()} @ ${lighterLimitPrice.toFixed(2)}`);
+    this.logger.info(`Placing aggressive limits: Nado ${nadoSide.toUpperCase()} @ ${nadoLimitPrice.toFixed(2)}, Lighter ${lighterSide.toUpperCase()} @ ${lighterLimitPriceRounded.toFixed(1)}`);
     
     const [nadoOrder, lighterOrder] = await Promise.all([
       nadoExchange.placeLimitOrder(symbol, nadoSide, size, nadoLimitPrice, { postOnly: false }),
-      lighterExchange.placeLimitOrder(symbol, lighterSide, size, lighterLimitPrice, { postOnly: false })
+      lighterExchange.placeLimitOrder(symbol, lighterSide, size, lighterLimitPriceRounded, { postOnly: false })
     ]);
     
     this.logger.info(`✓ Both orders placed! Nado: ${nadoOrder.orderId}, Lighter: ${lighterOrder.orderId}`);
@@ -429,22 +461,51 @@ export class ExecutionManager {
       
       // Automatically close any open position to avoid unhedged exposure
       if (nadoFilledSize >= size * 0.99 && lighterFilledSize < size * 0.99) {
-        // Nado filled, Lighter didn't - close Nado position
+        // Nado filled, Lighter didn't - cancel Lighter order and close Nado position
+        this.logger.warn(`🚨 CANCELING UNFILLED LIGHTER ORDER: ${lighterOrder.orderId}`);
+        try {
+          await lighterExchange.cancelOrder(symbol, lighterOrder.orderId);
+          this.logger.info(`✓ Lighter order canceled`);
+        } catch (cancelError: any) {
+          this.logger.error(`⚠️ Failed to cancel Lighter order: ${cancelError.message}`);
+        }
+        
         this.logger.warn(`🚨 CLOSING NADO POSITION: ${nadoFilledSize} BTC ${nadoSide} (unhedged)`);
         const closeNadoSide = nadoSide === 'buy' ? 'sell' : 'buy';
         await nadoExchange.placeMarketOrder(symbol, closeNadoSide, nadoFilledSize);
         this.logger.info(`✓ Nado position closed with market order`);
         throw new Error(`Entry aborted: Lighter did not fill, Nado position auto-closed`);
       } else if (lighterFilledSize >= size * 0.99 && nadoFilledSize < size * 0.99) {
-        // Lighter filled, Nado didn't - close Lighter position
+        // Lighter filled, Nado didn't - cancel Nado order and close Lighter position
+        this.logger.warn(`🚨 CANCELING UNFILLED NADO ORDER: ${nadoOrder.orderId}`);
+        try {
+          await nadoExchange.cancelOrder(symbol, nadoOrder.orderId);
+          this.logger.info(`✓ Nado order canceled`);
+        } catch (cancelError: any) {
+          this.logger.error(`⚠️ Failed to cancel Nado order: ${cancelError.message}`);
+        }
+        
         this.logger.warn(`🚨 CLOSING LIGHTER POSITION: ${lighterFilledSize} BTC ${lighterSide} (unhedged)`);
         const closeLighterSide = lighterSide === 'buy' ? 'sell' : 'buy';
         await lighterExchange.placeMarketOrder(symbol, closeLighterSide, lighterFilledSize);
         this.logger.info(`✓ Lighter position closed with market order`);
         throw new Error(`Entry aborted: Nado did not fill, Lighter position auto-closed`);
       } else {
-        // Neither filled or both partially filled
-        this.logger.error(`❌ Neither side filled properly - check exchanges manually`);
+        // Neither filled or both partially filled - cancel both orders
+        this.logger.error(`❌ Neither side filled properly - canceling both orders`);
+        try {
+          await Promise.all([
+            nadoExchange.cancelOrder(symbol, nadoOrder.orderId).catch((e: any) => 
+              this.logger.error(`Failed to cancel Nado: ${e.message}`)
+            ),
+            lighterExchange.cancelOrder(symbol, lighterOrder.orderId).catch((e: any) => 
+              this.logger.error(`Failed to cancel Lighter: ${e.message}`)
+            )
+          ]);
+          this.logger.info(`✓ Both orders canceled`);
+        } catch (cancelError: any) {
+          this.logger.error(`⚠️ Error canceling orders: ${cancelError.message}`);
+        }
         throw new Error(`Entry failed: Nado ${nadoFilledSize}, Lighter ${lighterFilledSize}`);
       }
     }
@@ -526,6 +587,198 @@ export class ExecutionManager {
   }
   
   /**
+   * SEQUENTIAL MAKER EXECUTION: Nado maker first, Lighter market on fill
+   * This ensures Nado order sits on orderbook (even briefly) for maker fee tier
+   */
+  private async executeSpreadEntrySequential(
+    cheapExchange: IExchange,
+    expensiveExchange: IExchange,
+    symbol: string,
+    size: number
+  ): Promise<{
+    cheapLeg: LegExecutionResult;
+    expensiveLeg: LegExecutionResult;
+  }> {
+    this.logger.info(`🎯 SEQUENTIAL MAKER: Nado maker first → Lighter market on fill`);
+    
+    // Determine which is Nado and which is Lighter
+    const isNadoCheap = cheapExchange.name === 'Nado';
+    const nadoExchange = isNadoCheap ? cheapExchange : expensiveExchange;
+    const lighterExchange = isNadoCheap ? expensiveExchange : cheapExchange;
+    const nadoSide: OrderSide = isNadoCheap ? 'buy' : 'sell';
+    const lighterSide: OrderSide = isNadoCheap ? 'sell' : 'buy';
+    
+    // Get fresh market data from Nado
+    const nadoMarket = await nadoExchange.getMarketData(symbol);
+    
+    // Calculate maker price: AT best bid/ask (NOT inside spread!)
+    // Per Nado docs: post-only orders must rest on the book to get maker fees
+    // To guarantee maker: BUY at best bid or LOWER, SELL at best ask or HIGHER
+    const tickSize = 1; // Nado uses $1 tick size for BTC
+    const offsetTicks = this.executionConfig.nadoMakerOffsetTicks;
+    
+    let nadoMakerPrice: number;
+    if (nadoSide === 'buy') {
+      // BUY: post AT best bid (offset goes DEEPER = lower price, more conservative)
+      // offset=0 means at best bid, offset=1 means $1 below best bid
+      nadoMakerPrice = nadoMarket.bidPrice - (offsetTicks * tickSize);
+    } else {
+      // SELL: post AT best ask (offset goes DEEPER = higher price, more conservative)  
+      // offset=0 means at best ask, offset=1 means $1 above best ask
+      nadoMakerPrice = nadoMarket.askPrice + (offsetTicks * tickSize);
+    }
+    
+    this.logger.info(
+      `📊 Nado market: bid=${nadoMarket.bidPrice}, ask=${nadoMarket.askPrice}, ` +
+      `spread=$${(nadoMarket.askPrice - nadoMarket.bidPrice).toFixed(2)}`
+    );
+    this.logger.info(
+      `📝 Placing Nado MAKER ${nadoSide.toUpperCase()} @ $${nadoMakerPrice.toFixed(2)} ` +
+      `(at best ${nadoSide === 'buy' ? 'bid' : 'ask'}${offsetTicks > 0 ? `, ${offsetTicks} tick${offsetTicks !== 1 ? 's' : ''} deeper` : ''})`
+    );
+    
+    // Step 1: Place Nado maker order (POST_ONLY to guarantee maker)
+    const nadoOrder = await nadoExchange.placeLimitOrder(
+      symbol,
+      nadoSide,
+      size,
+      nadoMakerPrice,
+      { postOnly: true } // POST_ONLY ensures it goes on book or rejects
+    );
+    
+    this.logger.info(`✓ Nado maker order placed: ${nadoOrder.orderId}`);
+    
+    // Step 2: Poll for Nado fill
+    const startTime = Date.now();
+    const timeoutMs = this.executionConfig.nadoMakerTimeoutMs;
+    const pollIntervalMs = this.executionConfig.nadoFillPollIntervalMs;
+    
+    let nadoFilled = false;
+    let nadoFilledSize = 0;
+    let nadoFillPrice = nadoMakerPrice;
+    
+    this.logger.info(`⏳ Waiting for Nado fill (timeout: ${timeoutMs}ms, poll: ${pollIntervalMs}ms)...`);
+    
+    while (Date.now() - startTime < timeoutMs) {
+      // Check position to see if filled
+      const nadoPos = await nadoExchange.getPosition(symbol);
+      nadoFilledSize = Math.abs(nadoPos?.size || 0);
+      
+      if (nadoFilledSize >= size * 0.99) {
+        nadoFilled = true;
+        nadoFillPrice = nadoPos?.entryPrice || nadoMakerPrice;
+        const fillTimeMs = Date.now() - startTime;
+        this.logger.info(`✅ Nado FILLED in ${fillTimeMs}ms! Size: ${nadoFilledSize} @ $${nadoFillPrice.toFixed(2)}`);
+        break;
+      }
+      
+      // Log progress every second
+      if ((Date.now() - startTime) % 1000 < pollIntervalMs) {
+        this.logger.debug(`  Waiting... ${Math.round((Date.now() - startTime) / 1000)}s elapsed`);
+      }
+      
+      await sleep(pollIntervalMs);
+    }
+    
+    // Step 3: Handle timeout - cancel Nado order if not filled
+    if (!nadoFilled) {
+      this.logger.warn(`⚠️ Nado maker order timed out after ${timeoutMs}ms - cancelling...`);
+      try {
+        await nadoExchange.cancelOrder(symbol, nadoOrder.orderId);
+        this.logger.info(`✓ Nado order cancelled`);
+      } catch (cancelError: any) {
+        this.logger.error(`Failed to cancel Nado order: ${cancelError.message}`);
+      }
+      
+      // Check if partially filled
+      const nadoPos = await nadoExchange.getPosition(symbol);
+      nadoFilledSize = Math.abs(nadoPos?.size || 0);
+      
+      if (nadoFilledSize > 0) {
+        // Partial fill - close the position and abort
+        this.logger.warn(`🚨 Partial fill detected: ${nadoFilledSize} BTC - closing position...`);
+        const closeNadoSide = nadoSide === 'buy' ? 'sell' : 'buy';
+        await nadoExchange.placeMarketOrder(symbol, closeNadoSide, nadoFilledSize);
+        this.logger.info(`✓ Partial position closed`);
+      }
+      
+      throw new Error(`Nado maker order timed out after ${timeoutMs}ms - no fill`);
+    }
+    
+    // Step 4: Nado filled! Now execute Lighter IMMEDIATELY as market
+    this.logger.info(`🚀 Nado filled → Executing Lighter ${lighterSide.toUpperCase()} MARKET order...`);
+    
+    const lighterMarket = await lighterExchange.getMarketData(symbol);
+    const lighterOrder = await lighterExchange.placeMarketOrder(symbol, lighterSide, size);
+    
+    this.logger.info(`✓ Lighter market order placed: ${lighterOrder.orderId}`);
+    
+    // Step 5: Wait and verify Lighter fill
+    await sleep(5000);
+    
+    const lighterPos = await lighterExchange.getPosition(symbol);
+    const lighterFilledSize = Math.abs(lighterPos?.size || 0);
+    const lighterFillPrice = lighterPos?.entryPrice || lighterMarket.midPrice;
+    
+    if (lighterFilledSize < size * 0.99) {
+      this.logger.error(`❌ Lighter did not fill! Closing Nado position to avoid unhedged exposure...`);
+      const closeNadoSide = nadoSide === 'buy' ? 'sell' : 'buy';
+      await nadoExchange.placeMarketOrder(symbol, closeNadoSide, nadoFilledSize);
+      throw new Error(`Lighter market order failed - Nado position closed`);
+    }
+    
+    this.logger.info(`✅ Both sides filled! Nado: $${nadoFillPrice.toFixed(2)}, Lighter: $${lighterFillPrice.toFixed(2)}`);
+    
+    // Build results
+    const nadoResult: LegExecutionResult = {
+      exchange: nadoExchange.name,
+      orderId: nadoOrder.orderId,
+      filledSize: nadoFilledSize,
+      averagePrice: nadoFillPrice,
+      usedMaker: true, // Guaranteed maker with POST_ONLY
+      feeUsd: this.calculateFeeUsd(nadoExchange.name, nadoFilledSize, nadoFillPrice, true)
+    };
+    
+    const lighterResult: LegExecutionResult = {
+      exchange: lighterExchange.name,
+      orderId: lighterOrder.orderId,
+      filledSize: lighterFilledSize,
+      averagePrice: lighterFillPrice,
+      usedMaker: false, // Market order = taker (but 0% fee on Lighter!)
+      feeUsd: this.calculateFeeUsd(lighterExchange.name, lighterFilledSize, lighterFillPrice, false)
+    };
+    
+    const cheapResult = isNadoCheap ? nadoResult : lighterResult;
+    const expensiveLeg = isNadoCheap ? lighterResult : nadoResult;
+    
+    // Calculate P&L
+    const buyNotional = cheapResult.filledSize * cheapResult.averagePrice;
+    const sellNotional = expensiveLeg.filledSize * expensiveLeg.averagePrice;
+    const grossPnl = sellNotional - buyNotional;
+    const totalFees = (cheapResult.feeUsd || 0) + (expensiveLeg.feeUsd || 0);
+    const netPnl = grossPnl - totalFees;
+    
+    this.logger.info(
+      `\n` +
+      `═══════════════════════════════════════════════════════════\n` +
+      `📊 SEQUENTIAL MAKER ENTRY COMPLETE\n` +
+      `───────────────────────────────────────────────────────────\n` +
+      `  Nado (MAKER): ${nadoSide.toUpperCase()} ${nadoResult.filledSize} BTC @ $${nadoResult.averagePrice.toFixed(2)}\n` +
+      `    Fee: $${(nadoResult.feeUsd || 0).toFixed(2)} (maker ✓)\n` +
+      `\n` +
+      `  Lighter (MARKET): ${lighterSide.toUpperCase()} ${lighterResult.filledSize} BTC @ $${lighterResult.averagePrice.toFixed(2)}\n` +
+      `    Fee: $${(lighterResult.feeUsd || 0).toFixed(2)} (taker @ 0%)\n` +
+      `───────────────────────────────────────────────────────────\n` +
+      `  Gross P&L: $${grossPnl.toFixed(2)}\n` +
+      `  Total Fees: -$${totalFees.toFixed(2)}\n` +
+      `  Net P&L: $${netPnl.toFixed(2)} ${netPnl >= 0 ? '✅' : '❌'}\n` +
+      `═══════════════════════════════════════════════════════════`
+    );
+    
+    return { cheapLeg: cheapResult, expensiveLeg };
+  }
+  
+  /**
    * Execute both legs of a spread exit:
    * SEQUENTIAL: Nado limit first (maker), then Lighter market (0% fee)
    */
@@ -546,6 +799,16 @@ export class ExecutionManager {
       `Executing spread exit: CLOSE LONG ${size} on ${longExchange.name}, ` +
       `CLOSE SHORT ${size} on ${shortExchange.name}`
     );
+    
+    // Check execution mode
+    if (this.executionConfig.mode === 'sequential_maker') {
+      return this.executeSpreadExitSequential(
+        longExchange,
+        shortExchange,
+        symbol,
+        size
+      );
+    }
     
     // STRATEGY: Simultaneous aggressive limits on BOTH exchanges (0.04% aggressive pricing)
     this.logger.info(`🚀 EXIT SIMULTANEOUS: Aggressive limits on BOTH sides (0.04% aggressive)...`);
@@ -574,15 +837,51 @@ export class ExecutionManager {
       ? lighterMarket.askPrice * 1.0004  // Buy: 0.04% above ask (crosses spread)
       : lighterMarket.bidPrice * 0.9996; // Sell: 0.04% below bid (crosses spread)
     
-    // Place BOTH orders simultaneously
-    this.logger.info(`Placing Nado ${nadoSide.toUpperCase()} @ ${nadoLimitPrice.toFixed(2)}, Lighter ${lighterSide.toUpperCase()} @ ${lighterLimitPrice.toFixed(2)}...`);
+    // Round Lighter price to $0.10 increments (Lighter's price_decimals = 1)
+    const lighterLimitPriceRounded = Math.round(lighterLimitPrice * 10) / 10;
     
-    const [nadoOrder, lighterOrder] = await Promise.all([
+    // Place BOTH orders simultaneously WITH TIMEOUT PROTECTION
+    this.logger.info(`Placing Nado ${nadoSide.toUpperCase()} @ ${nadoLimitPrice.toFixed(2)}, Lighter ${lighterSide.toUpperCase()} @ ${lighterLimitPriceRounded.toFixed(1)}...`);
+    
+    // Wrap each order placement with a 5-second timeout
+    const nadoOrderPromise = Promise.race([
       nadoExchange.placeLimitOrder(symbol, nadoSide, size, nadoLimitPrice, { postOnly: false, reduceOnly: true }),
-      lighterExchange.placeLimitOrder(symbol, lighterSide, size, lighterLimitPrice, { postOnly: false, reduceOnly: true })
+      sleep(5000).then(() => { throw new Error('Nado order timeout after 5s'); })
     ]);
     
-    this.logger.info(`✓ Both exit orders placed! Nado: ${nadoOrder.orderId}, Lighter: ${lighterOrder.orderId}`);
+    const lighterOrderPromise = Promise.race([
+      lighterExchange.placeLimitOrder(symbol, lighterSide, size, lighterLimitPriceRounded, { postOnly: false, reduceOnly: true }),
+      sleep(5000).then(() => { throw new Error('Lighter order timeout after 5s'); })
+    ]);
+    
+    // Try to place both orders
+    let nadoOrder: any;
+    let lighterOrder: any;
+    
+    try {
+      [nadoOrder, lighterOrder] = await Promise.all([nadoOrderPromise, lighterOrderPromise]);
+      this.logger.info(`✓ Both exit orders placed! Nado: ${nadoOrder.orderId}, Lighter: ${lighterOrder.orderId}`);
+    } catch (error: any) {
+      // If one exchange times out, fall back to market orders on BOTH
+      this.logger.error(`❌ Order placement failed or timed out: ${error.message}`);
+      this.logger.warn(`🚨 FALLING BACK TO MARKET ORDERS on both exchanges for immediate closure!`);
+      
+      // Cancel any pending orders and use market orders instead
+      try {
+        const [nadoMarketOrder, lighterMarketOrder] = await Promise.all([
+          nadoExchange.placeMarketOrder(symbol, nadoSide, size),
+          lighterExchange.placeMarketOrder(symbol, lighterSide, size)
+        ]);
+        
+        nadoOrder = nadoMarketOrder;
+        lighterOrder = lighterMarketOrder;
+        
+        this.logger.info(`✅ Market orders placed successfully! Nado: ${nadoOrder.orderId}, Lighter: ${lighterOrder.orderId}`);
+      } catch (marketError: any) {
+        this.logger.error(`❌ CRITICAL: Market order fallback also failed: ${marketError.message}`);
+        throw new Error('Both limit and market order placement failed!');
+      }
+    }
     
     // Wait and verify fills with retries (APIs can be slow to update)
     this.logger.info(`⏳ Waiting for exit fills to settle and APIs to update...`);
@@ -617,6 +916,38 @@ export class ExecutionManager {
       
       if (attempt < 3) {
         this.logger.warn(`⚠️  Not both closed yet, retrying...`);
+      } else {
+        // CRITICAL: After 3 attempts, force close with market orders
+        this.logger.error(`❌ CRITICAL: Limit orders failed to close after 3 attempts!`);
+        this.logger.error(`   Nado: ${nadoClosed ? 'CLOSED' : 'STILL OPEN'}, Lighter: ${lighterClosed ? 'CLOSED' : 'STILL OPEN'}`);
+        
+        // Force close any remaining open positions with market orders
+        if (!nadoClosed) {
+          this.logger.warn(`🚨 EMERGENCY: Force closing Nado with MARKET order...`);
+          try {
+            const nadoSide = isNadoLong ? 'sell' : 'buy';
+            const emergencyOrder = await nadoExchange.placeMarketOrder(symbol, nadoSide, size);
+            this.logger.info(`✅ Nado emergency close successful: ${emergencyOrder.orderId}`);
+          } catch (error: any) {
+            this.logger.error(`❌ FAILED to emergency close Nado: ${error.message}`);
+            this.logger.error(`⚠️  MANUAL INTERVENTION REQUIRED - Nado position still open!`);
+          }
+        }
+        
+        if (!lighterClosed) {
+          this.logger.warn(`🚨 EMERGENCY: Force closing Lighter with MARKET order...`);
+          try {
+            const lighterSide = isNadoLong ? 'buy' : 'sell';
+            const emergencyOrder = await lighterExchange.placeMarketOrder(symbol, lighterSide, size);
+            this.logger.info(`✅ Lighter emergency close successful: ${emergencyOrder.orderId}`);
+          } catch (error: any) {
+            this.logger.error(`❌ FAILED to emergency close Lighter: ${error.message}`);
+            this.logger.error(`⚠️  MANUAL INTERVENTION REQUIRED - Lighter position still open!`);
+          }
+        }
+        
+        // Wait a bit for emergency orders to settle
+        await new Promise(resolve => setTimeout(resolve, 5000));
       }
     }
     
@@ -668,6 +999,175 @@ export class ExecutionManager {
       `  Net P&L: $${netPnl.toFixed(2)} ${netPnl >= 0 ? '✅' : '❌'}\n` +
       `  Airdrop Value: +$100.00 ✨\n` +
       `  TOTAL VALUE: $${(netPnl + 100).toFixed(2)} 💰\n` +
+      `═══════════════════════════════════════════════════════════`
+    );
+    
+    return { longLeg: longResult, shortLeg: shortResult };
+  }
+  
+  /**
+   * SEQUENTIAL MAKER EXIT: Nado maker first, Lighter market on fill
+   */
+  private async executeSpreadExitSequential(
+    longExchange: IExchange,
+    shortExchange: IExchange,
+    symbol: string,
+    size: number
+  ): Promise<{
+    longLeg: LegExecutionResult;
+    shortLeg: LegExecutionResult;
+  }> {
+    this.logger.info(`🎯 SEQUENTIAL MAKER EXIT: Nado maker first → Lighter market on fill`);
+    
+    // Determine which is Nado and which is Lighter
+    const isNadoLong = longExchange.name === 'Nado';
+    const nadoExchange = isNadoLong ? longExchange : shortExchange;
+    const lighterExchange = isNadoLong ? shortExchange : longExchange;
+    // Exit: close LONG = sell, close SHORT = buy
+    const nadoSide: OrderSide = isNadoLong ? 'sell' : 'buy';
+    const lighterSide: OrderSide = isNadoLong ? 'buy' : 'sell';
+    
+    // Get fresh market data from Nado
+    const nadoMarket = await nadoExchange.getMarketData(symbol);
+    
+    // Calculate maker price for exit: AT best bid/ask (NOT inside spread!)
+    const tickSize = 1;
+    const offsetTicks = this.executionConfig.nadoMakerOffsetTicks;
+    
+    let nadoMakerPrice: number;
+    if (nadoSide === 'buy') {
+      // BUY to close short: post AT best bid (offset goes deeper = lower)
+      nadoMakerPrice = nadoMarket.bidPrice - (offsetTicks * tickSize);
+    } else {
+      // SELL to close long: post AT best ask (offset goes deeper = higher)
+      nadoMakerPrice = nadoMarket.askPrice + (offsetTicks * tickSize);
+    }
+    
+    this.logger.info(
+      `📊 Nado market: bid=${nadoMarket.bidPrice}, ask=${nadoMarket.askPrice}`
+    );
+    this.logger.info(
+      `📝 Placing Nado MAKER EXIT ${nadoSide.toUpperCase()} @ $${nadoMakerPrice.toFixed(2)}`
+    );
+    
+    // Step 1: Place Nado maker order with reduceOnly
+    const nadoOrder = await nadoExchange.placeLimitOrder(
+      symbol,
+      nadoSide,
+      size,
+      nadoMakerPrice,
+      { postOnly: true, reduceOnly: true }
+    );
+    
+    this.logger.info(`✓ Nado maker exit order placed: ${nadoOrder.orderId}`);
+    
+    // Step 2: Poll for Nado fill (check if position is closed)
+    const startTime = Date.now();
+    const timeoutMs = this.executionConfig.nadoMakerTimeoutMs;
+    const pollIntervalMs = this.executionConfig.nadoFillPollIntervalMs;
+    
+    let nadoFilled = false;
+    let nadoFillPrice = nadoMakerPrice;
+    
+    this.logger.info(`⏳ Waiting for Nado exit fill...`);
+    
+    while (Date.now() - startTime < timeoutMs) {
+      const nadoPos = await nadoExchange.getPosition(symbol);
+      const remainingSize = Math.abs(nadoPos?.size || 0);
+      
+      if (remainingSize < size * 0.1) { // Position closed (< 10% remaining)
+        nadoFilled = true;
+        const fillTimeMs = Date.now() - startTime;
+        this.logger.info(`✅ Nado EXIT FILLED in ${fillTimeMs}ms!`);
+        break;
+      }
+      
+      await sleep(pollIntervalMs);
+    }
+    
+    // Step 3: Handle timeout
+    if (!nadoFilled) {
+      this.logger.warn(`⚠️ Nado exit maker timed out - using MARKET to close!`);
+      try {
+        await nadoExchange.cancelOrder(symbol, nadoOrder.orderId);
+      } catch (e: any) {
+        this.logger.warn(`Cancel failed: ${e.message}`);
+      }
+      
+      // Force close with market order
+      const emergencyOrder = await nadoExchange.placeMarketOrder(symbol, nadoSide, size, { reduceOnly: true });
+      this.logger.info(`✓ Nado emergency market close: ${emergencyOrder.orderId}`);
+      nadoFillPrice = emergencyOrder.price || nadoMakerPrice;
+    }
+    
+    // Step 4: Execute Lighter exit as market
+    this.logger.info(`🚀 Executing Lighter ${lighterSide.toUpperCase()} MARKET exit...`);
+    
+    const lighterMarket = await lighterExchange.getMarketData(symbol);
+    const lighterOrder = await lighterExchange.placeMarketOrder(symbol, lighterSide, size);
+    
+    this.logger.info(`✓ Lighter market exit placed: ${lighterOrder.orderId}`);
+    
+    // Step 5: Verify positions closed
+    await sleep(5000);
+    
+    const [nadoPos, lighterPos] = await Promise.all([
+      nadoExchange.getPosition(symbol),
+      lighterExchange.getPosition(symbol)
+    ]);
+    
+    const nadoClosed = Math.abs(nadoPos?.size || 0) < size * 0.1;
+    const lighterClosed = Math.abs(lighterPos?.size || 0) < size * 0.1;
+    
+    if (!nadoClosed || !lighterClosed) {
+      this.logger.error(`⚠️ Exit incomplete! Nado: ${nadoClosed ? 'CLOSED' : 'OPEN'}, Lighter: ${lighterClosed ? 'CLOSED' : 'OPEN'}`);
+    }
+    
+    const lighterFillPrice = lighterPos?.entryPrice || lighterMarket.midPrice;
+    
+    // Build results
+    const nadoResult: LegExecutionResult = {
+      exchange: nadoExchange.name,
+      orderId: nadoOrder.orderId,
+      filledSize: size,
+      averagePrice: nadoFillPrice,
+      usedMaker: nadoFilled, // True if maker filled, false if had to use market
+      feeUsd: this.calculateFeeUsd(nadoExchange.name, size, nadoFillPrice, nadoFilled)
+    };
+    
+    const lighterResult: LegExecutionResult = {
+      exchange: lighterExchange.name,
+      orderId: lighterOrder.orderId,
+      filledSize: size,
+      averagePrice: lighterFillPrice,
+      usedMaker: false,
+      feeUsd: this.calculateFeeUsd(lighterExchange.name, size, lighterFillPrice, false)
+    };
+    
+    const longResult = isNadoLong ? nadoResult : lighterResult;
+    const shortResult = isNadoLong ? lighterResult : nadoResult;
+    
+    // Calculate P&L
+    const sellNotional = longResult.filledSize * longResult.averagePrice;
+    const buyNotional = shortResult.filledSize * shortResult.averagePrice;
+    const grossPnl = sellNotional - buyNotional;
+    const totalFees = (longResult.feeUsd || 0) + (shortResult.feeUsd || 0);
+    const netPnl = grossPnl - totalFees;
+    
+    this.logger.info(
+      `\n` +
+      `═══════════════════════════════════════════════════════════\n` +
+      `📊 SEQUENTIAL MAKER EXIT COMPLETE\n` +
+      `───────────────────────────────────────────────────────────\n` +
+      `  Nado: ${nadoSide.toUpperCase()} ${nadoResult.filledSize} BTC @ $${nadoResult.averagePrice.toFixed(2)}\n` +
+      `    Fee: $${(nadoResult.feeUsd || 0).toFixed(2)} (${nadoResult.usedMaker ? 'maker ✓' : 'taker'})\n` +
+      `\n` +
+      `  Lighter: ${lighterSide.toUpperCase()} ${lighterResult.filledSize} BTC @ $${lighterResult.averagePrice.toFixed(2)}\n` +
+      `    Fee: $${(lighterResult.feeUsd || 0).toFixed(2)} (taker @ 0%)\n` +
+      `───────────────────────────────────────────────────────────\n` +
+      `  Gross P&L: $${grossPnl.toFixed(2)}\n` +
+      `  Total Fees: -$${totalFees.toFixed(2)}\n` +
+      `  Net P&L: $${netPnl.toFixed(2)} ${netPnl >= 0 ? '✅' : '❌'}\n` +
       `═══════════════════════════════════════════════════════════`
     );
     

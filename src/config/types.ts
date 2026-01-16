@@ -23,6 +23,9 @@ export interface BotConfig {
   // Risk parameters
   risk: RiskConfig;
 
+  // Execution mode settings (optional - defaults provided)
+  execution?: ExecutionConfig;
+
   // Operational settings
   dryRun: boolean;
   logLevel: 'debug' | 'info' | 'warn' | 'error';
@@ -55,6 +58,26 @@ export interface RiskConfig {
   minMarginBufferPercent: number;
   maxPartialFillWaitMs: number;
   maxConsecutiveErrors: number;
+}
+
+export interface ExecutionConfig {
+  // "sequential_maker" = Nado maker first, then Lighter market on fill
+  // "simultaneous" = Both exchanges aggressive limit at same time (current behavior)
+  mode: 'sequential_maker' | 'simultaneous';
+  
+  // For sequential_maker: how conservative to price the Nado maker order
+  // Per Nado docs: post-only orders must NOT cross the spread to get maker fees
+  // 0 = at best bid/ask (best fill chance while staying maker)
+  // positive = ticks DEEPER in book (more conservative, slower fill)
+  //   BUY: offset=1 means $1 BELOW best bid
+  //   SELL: offset=1 means $1 ABOVE best ask
+  nadoMakerOffsetTicks: number;
+  
+  // Max time to wait for Nado maker to fill before cancelling
+  nadoMakerTimeoutMs: number;
+  
+  // Poll interval for checking Nado fill status
+  nadoFillPollIntervalMs: number;
 }
 
 export type OrderSide = 'buy' | 'sell';

@@ -11,6 +11,7 @@ import { BotStateManager } from './state';
 import { ExecutionManager } from './execution';
 import { RiskManager } from './risk';
 import { TradeLogger, CompletedTrade } from './trade-logger';
+import { CsvTradeLogger, TradeLogEntry } from '../utils/csv-logger';
 
 export class BasisTradingStrategy {
   private config: BotConfig;
@@ -20,6 +21,7 @@ export class BasisTradingStrategy {
   private executionManager: ExecutionManager;
   private riskManager: RiskManager;
   private tradeLogger: TradeLogger;
+  private csvLogger: CsvTradeLogger; // CSV logger for detailed trade records
   private nadoExchange: IExchange;
   private lighterExchange: IExchange;
   private symbol: string;
@@ -45,10 +47,13 @@ export class BasisTradingStrategy {
       config.fees?.nadoMakerFeeBps || 1,
       config.fees?.nadoTakerFeeBps || 3.5,
       config.fees?.lighterMakerFeeBps || 0.2,
-      config.fees?.lighterTakerFeeBps || 0.2
+      config.fees?.lighterTakerFeeBps || 0.2,
+      config.execution // Pass execution config for sequential maker mode
     );
     this.riskManager = new RiskManager(config, logger);
     this.tradeLogger = new TradeLogger(logger);
+    this.csvLogger = new CsvTradeLogger('./logs');
+    this.logger.info(`📊 CSV trade logging enabled: ${this.csvLogger.getLogFilePath()}`);
   }
   
   /**
@@ -206,12 +211,42 @@ export class BasisTradingStrategy {
             this.logger.warn(`   Closing Nado ${nadoPosition!.side.toUpperCase()} ${nadoSize} BTC with market order...`);
             await this.nadoExchange.placeMarketOrder(this.symbol, side, nadoSize);
             this.logger.info('   ✓ Nado orphaned position closed');
+            
+            // Log to CSV
+            const csvEntry: TradeLogEntry = {
+              timestamp: new Date().toISOString(),
+              tradeId: `unhedged-${Date.now()}`,
+              action: 'UNHEDGED_CLOSE',
+              status: 'UNHEDGED',
+              nadoSide: side,
+              nadoSize: nadoSize,
+              nadoPrice: nadoPosition!.entryPrice,
+              nadoFilled: true,
+              lighterFilled: false,
+              notes: 'Auto-closed unhedged Nado position (Lighter never filled or already closed)'
+            };
+            this.csvLogger.logTrade(csvEntry);
           } else {
             // Close Lighter position
             const side = lighterPosition!.side === 'long' ? 'sell' : 'buy';
             this.logger.warn(`   Closing Lighter ${lighterPosition!.side.toUpperCase()} ${lighterSize} BTC with market order...`);
             await this.lighterExchange.placeMarketOrder(this.symbol, side, lighterSize);
             this.logger.info('   ✓ Lighter orphaned position closed');
+            
+            // Log to CSV
+            const csvEntry: TradeLogEntry = {
+              timestamp: new Date().toISOString(),
+              tradeId: `unhedged-${Date.now()}`,
+              action: 'UNHEDGED_CLOSE',
+              status: 'UNHEDGED',
+              lighterSide: side,
+              lighterSize: lighterSize,
+              lighterPrice: lighterPosition!.entryPrice,
+              lighterFilled: true,
+              nadoFilled: false,
+              notes: 'Auto-closed unhedged Lighter position (Nado never filled or already closed)'
+            };
+            this.csvLogger.logTrade(csvEntry);
           }
           
           this.logger.info('✅ Orphaned position closed - bot can now trade normally');
@@ -434,6 +469,32 @@ export class BasisTradingStrategy {
         result.expensiveLeg.orderId
       );
       
+      // Log to CSV with entry details
+      const tradeId = `trade-${Date.now()}`;
+      const csvEntry: TradeLogEntry = {
+        timestamp: new Date().toISOString(),
+        tradeId,
+        action: 'ENTRY',
+        status: 'SUCCESS',
+        entryGapUsd: gapUsd,
+        lighterSide: cheapExchangeName === 'lighter' ? 'buy' : 'sell',
+        lighterOrderId: cheapExchangeName === 'lighter' ? result.cheapLeg.orderId : result.expensiveLeg.orderId,
+        lighterSize: this.config.positionSizeBtc,
+        lighterPrice: cheapExchangeName === 'lighter' ? result.cheapLeg.averagePrice : result.expensiveLeg.averagePrice,
+        lighterFilled: true,
+        lighterFeeUsd: cheapExchangeName === 'lighter' ? 0 : 0, // Lighter entry fees are 0
+        nadoSide: cheapExchangeName === 'nado' ? 'buy' : 'sell',
+        nadoOrderId: cheapExchangeName === 'nado' ? result.cheapLeg.orderId : result.expensiveLeg.orderId,
+        nadoSize: this.config.positionSizeBtc,
+        nadoPrice: cheapExchangeName === 'nado' ? result.cheapLeg.averagePrice : result.expensiveLeg.averagePrice,
+        nadoFilled: true,
+        nadoFeeUsd: cheapExchangeName === 'nado' 
+          ? (this.config.fees.nadoMakerFeeBps / 10000) * result.cheapLeg.averagePrice * this.config.positionSizeBtc
+          : (this.config.fees.nadoMakerFeeBps / 10000) * result.expensiveLeg.averagePrice * this.config.positionSizeBtc,
+        notes: `LONG ${cheapExchangeName} @ ${result.cheapLeg.averagePrice.toFixed(2)}, SHORT ${expensiveExchangeName} @ ${result.expensiveLeg.averagePrice.toFixed(2)}`
+      };
+      this.csvLogger.logTrade(csvEntry);
+      
       this.logger.info(
         `✓ SPREAD OPENED: Entry gap ${gapUsd.toFixed(2)} USD, ` +
         `LONG ${this.config.positionSizeBtc} on ${cheapExchangeName} @ ${result.cheapLeg.averagePrice.toFixed(2)}, ` +
@@ -637,6 +698,33 @@ export class BasisTradingStrategy {
       
       this.tradeLogger.logTrade(trade);
       
+      // Log to CSV with detailed information
+      const csvEntry: TradeLogEntry = {
+        timestamp: new Date().toISOString(),
+        tradeId: trade.id,
+        action: 'EXIT',
+        status: 'SUCCESS',
+        entryGapUsd: position.entryGapUsd,
+        exitGapUsd,
+        holdDurationSeconds: trade.holdDurationSeconds,
+        lighterSide: position.cheapExchange === 'lighter' ? 'buy' : 'sell',
+        lighterSize: this.config.positionSizeBtc,
+        lighterPrice: position.cheapExchange === 'lighter' ? position.cheapExchangePrice : position.expensiveExchangePrice,
+        lighterFilled: true,
+        lighterFeeUsd: position.cheapExchange === 'lighter' ? lighterEntryFee : 0,
+        nadoSide: position.cheapExchange === 'nado' ? 'buy' : 'sell',
+        nadoSize: this.config.positionSizeBtc,
+        nadoPrice: position.cheapExchange === 'nado' ? position.cheapExchangePrice : position.expensiveExchangePrice,
+        nadoFilled: true,
+        nadoFeeUsd: nadoEntryFee,
+        grossPnlUsd: realizedPnlUsd,
+        totalFeesUsd,
+        netPnlUsd: realizedPnlUsd - totalFeesUsd,
+        netPnlBtc: realizedPnlBtc,
+        notes: `Entry: ${position.cheapExchange} @ ${position.cheapExchangePrice.toFixed(2)}, ${position.expensiveExchange} @ ${position.expensiveExchangePrice.toFixed(2)}`
+      };
+      this.csvLogger.logTrade(csvEntry);
+      
       // RELEASE LOCK - Exit completed successfully
       this.isExecutingTrade = false;
       this.logger.info('🔓 LOCK RELEASED (EXIT) - Bot can now enter new positions');
@@ -704,6 +792,21 @@ export class BasisTradingStrategy {
           nadoPosition.size,
           { reduceOnly: true }
         );
+        
+        // Log emergency closure to CSV
+        const csvEntry: TradeLogEntry = {
+          timestamp: new Date().toISOString(),
+          tradeId: `emergency-${Date.now()}`,
+          action: 'EMERGENCY_CLOSE',
+          status: 'PARTIAL',
+          nadoSide: side,
+          nadoSize: nadoPosition.size,
+          nadoPrice: nadoPosition.entryPrice,
+          nadoFilled: true,
+          lighterFilled: false,
+          notes: 'Emergency closure: Nado position only (Lighter failed to fill)'
+        };
+        this.csvLogger.logTrade(csvEntry);
       } else if (lighterPosition && !nadoPosition) {
         this.logger.warn('Detected position on Lighter only - closing with market order');
         const side = lighterPosition.side === 'long' ? 'sell' : 'buy';
@@ -713,6 +816,21 @@ export class BasisTradingStrategy {
           lighterPosition.size,
           { reduceOnly: true }
         );
+        
+        // Log emergency closure to CSV
+        const csvEntry: TradeLogEntry = {
+          timestamp: new Date().toISOString(),
+          tradeId: `emergency-${Date.now()}`,
+          action: 'EMERGENCY_CLOSE',
+          status: 'PARTIAL',
+          lighterSide: side,
+          lighterSize: lighterPosition.size,
+          lighterPrice: lighterPosition.entryPrice,
+          lighterFilled: true,
+          nadoFilled: false,
+          notes: 'Emergency closure: Lighter position only (Nado failed to fill)'
+        };
+        this.csvLogger.logTrade(csvEntry);
       }
       
       this.logger.info('Partial fill emergency handled');
