@@ -61,9 +61,11 @@ export interface RiskConfig {
 }
 
 export interface ExecutionConfig {
-  // "sequential_maker" = Nado maker first, then Lighter market on fill
-  // "simultaneous" = Both exchanges aggressive limit at same time (current behavior)
-  mode: 'sequential_maker' | 'simultaneous';
+  // Execution mode for entries and exits (can be different!)
+  // "sequential_maker" = Nado maker first, then Lighter on fill (lower fees, slower)
+  // "simultaneous" = Both exchanges aggressive limit at same time (faster, slightly higher fees)
+  entryMode: 'sequential_maker' | 'simultaneous';
+  exitMode: 'sequential_maker' | 'simultaneous';
   
   // For sequential_maker: how conservative to price the Nado maker order
   // Per Nado docs: post-only orders must NOT cross the spread to get maker fees

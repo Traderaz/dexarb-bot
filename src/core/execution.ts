@@ -14,8 +14,9 @@ import { sleep } from '../utils/retry';
 
 // Default execution config
 const DEFAULT_EXECUTION_CONFIG: ExecutionConfig = {
-  mode: 'simultaneous',
-  nadoMakerOffsetTicks: 1,
+  entryMode: 'sequential_maker',
+  exitMode: 'sequential_maker',
+  nadoMakerOffsetTicks: 0,
   nadoMakerTimeoutMs: 30000,
   nadoFillPollIntervalMs: 100
 };
@@ -367,8 +368,8 @@ export class ExecutionManager {
       `SHORT ${size} on ${expensiveExchange.name}`
     );
     
-    // Check execution mode
-    if (this.executionConfig.mode === 'sequential_maker') {
+    // Check execution mode for entries
+    if (this.executionConfig.entryMode === 'sequential_maker') {
       return this.executeSpreadEntrySequential(
         cheapExchange,
         expensiveExchange,
@@ -705,13 +706,33 @@ export class ExecutionManager {
       throw new Error(`Nado maker order timed out after ${timeoutMs}ms - no fill`);
     }
     
-    // Step 4: Nado filled! Now execute Lighter IMMEDIATELY as market
-    this.logger.info(`🚀 Nado filled → Executing Lighter ${lighterSide.toUpperCase()} MARKET order...`);
+    // Step 4: Nado filled! Now execute Lighter IMMEDIATELY with aggressive limit (0.4% across spread)
+    this.logger.info(`🚀 Nado filled → Executing Lighter ${lighterSide.toUpperCase()} aggressive limit (0.4%)...`);
     
     const lighterMarket = await lighterExchange.getMarketData(symbol);
-    const lighterOrder = await lighterExchange.placeMarketOrder(symbol, lighterSide, size);
     
-    this.logger.info(`✓ Lighter market order placed: ${lighterOrder.orderId}`);
+    // Calculate aggressive limit price: 0.4% across the spread (crosses but better than pure market)
+    let lighterLimitPrice: number;
+    if (lighterSide === 'buy') {
+      lighterLimitPrice = lighterMarket.askPrice * 1.004; // 0.4% above ask
+    } else {
+      lighterLimitPrice = lighterMarket.bidPrice * 0.996; // 0.4% below bid
+    }
+    
+    // Round to Lighter's $0.10 tick size
+    const lighterLimitPriceRounded = Math.round(lighterLimitPrice * 10) / 10;
+    
+    this.logger.info(`  Lighter ${lighterSide.toUpperCase()} @ $${lighterLimitPriceRounded.toFixed(1)} (ask: ${lighterMarket.askPrice}, bid: ${lighterMarket.bidPrice})`);
+    
+    const lighterOrder = await lighterExchange.placeLimitOrder(
+      symbol, 
+      lighterSide, 
+      size,
+      lighterLimitPriceRounded,
+      { postOnly: false } // Allow crossing for immediate fill
+    );
+    
+    this.logger.info(`✓ Lighter aggressive limit placed: ${lighterOrder.orderId}`);
     
     // Step 5: Wait and verify Lighter fill
     await sleep(5000);
@@ -800,8 +821,8 @@ export class ExecutionManager {
       `CLOSE SHORT ${size} on ${shortExchange.name}`
     );
     
-    // Check execution mode
-    if (this.executionConfig.mode === 'sequential_maker') {
+    // Check execution mode for exits
+    if (this.executionConfig.exitMode === 'sequential_maker') {
       return this.executeSpreadExitSequential(
         longExchange,
         shortExchange,
@@ -1100,13 +1121,33 @@ export class ExecutionManager {
       nadoFillPrice = emergencyOrder.price || nadoMakerPrice;
     }
     
-    // Step 4: Execute Lighter exit as market
-    this.logger.info(`🚀 Executing Lighter ${lighterSide.toUpperCase()} MARKET exit...`);
+    // Step 4: Execute Lighter exit with aggressive limit (0.4% across spread)
+    this.logger.info(`🚀 Executing Lighter ${lighterSide.toUpperCase()} aggressive limit exit (0.4%)...`);
     
     const lighterMarket = await lighterExchange.getMarketData(symbol);
-    const lighterOrder = await lighterExchange.placeMarketOrder(symbol, lighterSide, size);
     
-    this.logger.info(`✓ Lighter market exit placed: ${lighterOrder.orderId}`);
+    // Calculate aggressive limit price: 0.4% across the spread
+    let lighterLimitPrice: number;
+    if (lighterSide === 'buy') {
+      lighterLimitPrice = lighterMarket.askPrice * 1.004; // 0.4% above ask
+    } else {
+      lighterLimitPrice = lighterMarket.bidPrice * 0.996; // 0.4% below bid
+    }
+    
+    // Round to Lighter's $0.10 tick size
+    const lighterLimitPriceRounded = Math.round(lighterLimitPrice * 10) / 10;
+    
+    this.logger.info(`  Lighter ${lighterSide.toUpperCase()} @ $${lighterLimitPriceRounded.toFixed(1)} (ask: ${lighterMarket.askPrice}, bid: ${lighterMarket.bidPrice})`);
+    
+    const lighterOrder = await lighterExchange.placeLimitOrder(
+      symbol, 
+      lighterSide, 
+      size,
+      lighterLimitPriceRounded,
+      { postOnly: false } // Allow crossing
+    );
+    
+    this.logger.info(`✓ Lighter aggressive limit exit placed: ${lighterOrder.orderId}`);
     
     // Step 5: Verify positions closed
     await sleep(5000);
