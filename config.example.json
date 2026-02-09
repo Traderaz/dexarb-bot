@@ -1,59 +1,60 @@
 {
-  "entryGapUsd": 120,
-  "exitGapUsd": 50,
-  "positionSizeBtc": 0.05,
+  "entryGapUsd": 90,
+  "maxEntryGapUsd": 170,
+  "exitGapUsd": 10,
+  "positionSizeBtc": 0.1,
   "minHoldDurationSeconds": 180,
   "maxHoldDurationSeconds": null,
-  "maxNetFundingPerHourThreshold": 0,
+  "maxNetFundingPerHourThreshold": 999999,
   "entryTimeoutMs": 10000,
   "exitTimeoutMs": 10000,
   
   "nado": {
     "name": "Nado",
-    "restApiUrl": "https://api.nado.exchange",
-    "wsUrl": "wss://ws.nado.exchange",
-    "apiKey": "YOUR_NADO_API_KEY",
-    "apiSecret": "YOUR_NADO_API_SECRET",
-    "passphrase": "",
-    "testnet": false,
-    "_comment": "wsUrl is REQUIRED - get from Nado documentation"
+    "restApiUrl": "https://gateway.prod.nado.xyz/v1",
+    "wsUrl": "wss://gateway.prod.nado.xyz/v1/subscribe",
+    "apiKey": "YOUR_NADO_API_KEY_HERE",
+    "apiSecret": "YOUR_NADO_API_SECRET_HERE",
+    "walletAddress": "0xYOUR_WALLET_ADDRESS_HERE",
+    "testnet": false
   },
   
   "lighter": {
     "name": "Lighter",
     "restApiUrl": "https://mainnet.zklighter.elliot.ai",
     "wsUrl": "wss://mainnet.zklighter.elliot.ai/stream",
-    "apiKey": "YOUR_LIGHTER_API_PRIVATE_KEY",
-    "apiSecret": "YOUR_LIGHTER_API_PRIVATE_KEY",
-    "passphrase": "",
+    "apiPublicKey": "YOUR_LIGHTER_PUBLIC_KEY_HERE",
+    "apiPrivateKey": "YOUR_LIGHTER_PRIVATE_KEY_HERE",
+    "accountIndex": 0,
+    "apiKeyIndex": 0,
     "testnet": false,
-    "_comment": "URLs confirmed from Lighter docs. Need to generate API key programmatically."
+    "chainId": 304
   },
   
   "fees": {
-    "makerFeeBps": 0,
-    "takerFeeBps": 5
+    "nadoMakerFeeBps": 1,
+    "nadoTakerFeeBps": 3.5,
+    "lighterMakerFeeBps": 0,
+    "lighterTakerFeeBps": 0
   },
   
   "risk": {
-    "maxLeverage": 10,
-    "minMarginBufferPercent": 20,
+    "maxLeverage": 40,
+    "minMarginBufferPercent": 0,
     "maxPartialFillWaitMs": 5000,
-    "maxConsecutiveErrors": 5,
-    "maxSlippageBps": 10
+    "maxConsecutiveErrors": 5
   },
   
   "execution": {
-    "_comment": "Aggressive limit orders: slightly better than best bid/ask to increase fill probability",
-    "aggressiveLimitOrderBps": 2,
-    "limitOrderTimeoutMs": 3000,
-    "allowTakerFallback": false,
-    "_explanation": "aggressiveLimitOrderBps=2 means buy 2bps above best bid, sell 2bps below best ask"
+    "entryMode": "sequential_maker",
+    "exitMode": "sequential_maker",
+    "nadoMakerOffsetTicks": 0,
+    "nadoMakerTimeoutMs": 30000,
+    "nadoFillPollIntervalMs": 100
   },
   
-  "dryRun": true,
+  "dryRun": false,
   "logLevel": "info",
   "marketDataUpdateIntervalMs": 5000,
   "fundingRateUpdateIntervalMs": 300000
 }
-
