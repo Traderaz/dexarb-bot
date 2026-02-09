@@ -23,7 +23,7 @@ High-performance arbitrage bot for BTC-PERP trading between Nado and Lighter exc
 
 ```bash
 # Clone repository
-git clone <your-repo-url>
+git clone https://github.com/yourusername/dexarb.git
 cd dexarb
 
 # Install dependencies
@@ -175,10 +175,12 @@ dexarb/
 ├── public/                 # Web frontend
 │   └── index.html          # Dashboard UI
 ├── web-server.js           # Express API server
-├── emergency-close-api.js  # Position closing logic
 ├── lighter-order.js        # Lighter FFI integration
-├── config.json             # Bot configuration (git-ignored)
+├── lighter-rest-api.js     # Lighter REST API wrapper
+├── config.example.json     # Configuration template
+├── env.example             # Environment variables template
 ├── package.json            # Dependencies
+├── LICENSE                 # MIT License
 └── DEPLOYMENT_GUIDE.md     # VPS deployment instructions
 ```
 

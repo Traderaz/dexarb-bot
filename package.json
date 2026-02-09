@@ -9,12 +9,7 @@
     "start:web": "node web-server.js",
     "dev": "ts-node src/index.ts",
     "watch": "tsc --watch",
-    "clean": "rimraf dist",
-    "positions": "node check-positions.js",
-    "status": "node check-bot-status.js",
-    "test:order": "node test-lighter-ffi.js",
-    "test:api": "node test-api-endpoints.js",
-    "trades": "node view-trades.js"
+    "clean": "rimraf dist"
   },
   "keywords": [
     "crypto",
@@ -23,8 +18,12 @@
     "basis-trade",
     "hft"
   ],
-  "author": "",
+  "author": "Your Name <your.email@example.com>",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/dexarb.git"
+  },
   "dependencies": {
     "@nadohq/client": "^0.1.0-alpha.40",
     "@reservoir0x/lighter-ts-sdk": "^1.0.7-alpha8",
