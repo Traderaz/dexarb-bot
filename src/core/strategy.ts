@@ -10,7 +10,8 @@ import { BotStateManager } from './state';
 // import { FundingManager } from './funding'; // Disabled - funding check removed
 import { ExecutionManager } from './execution';
 import { RiskManager } from './risk';
-import { TradeLogger, CompletedTrade } from './trade-logger';
+import { CompletedTrade } from './trade-logger';
+import { SupabaseTradeLogger } from './supabase-trade-logger';
 import { CsvTradeLogger, TradeLogEntry } from '../utils/csv-logger';
 
 export class BasisTradingStrategy {
@@ -20,7 +21,7 @@ export class BasisTradingStrategy {
   // private _fundingManager: FundingManager; // Unused - funding check disabled
   private executionManager: ExecutionManager;
   private riskManager: RiskManager;
-  private tradeLogger: TradeLogger;
+  private tradeLogger: SupabaseTradeLogger;
   private csvLogger: CsvTradeLogger; // CSV logger for detailed trade records
   private nadoExchange: IExchange;
   private lighterExchange: IExchange;
@@ -51,7 +52,7 @@ export class BasisTradingStrategy {
       config.execution // Pass execution config for sequential maker mode
     );
     this.riskManager = new RiskManager(config, logger);
-    this.tradeLogger = new TradeLogger(logger);
+    this.tradeLogger = new SupabaseTradeLogger(logger);
     this.csvLogger = new CsvTradeLogger('./logs');
     this.logger.info(`📊 CSV trade logging enabled: ${this.csvLogger.getLogFilePath()}`);
   }
@@ -696,7 +697,7 @@ export class BasisTradingStrategy {
         }
       };
       
-      this.tradeLogger.logTrade(trade);
+      await this.tradeLogger.logTrade(trade);
       
       // Log to CSV with detailed information
       const csvEntry: TradeLogEntry = {

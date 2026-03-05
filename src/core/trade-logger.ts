@@ -36,7 +36,7 @@ export interface CompletedTrade {
 
 export class TradeLogger {
   private logFilePath: string;
-  private logger: Logger;
+  protected logger: Logger;
   
   constructor(logger: Logger, logDir: string = './logs') {
     this.logger = logger;

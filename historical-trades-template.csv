@@ -1,0 +1,3 @@
+trade_id,entry_timestamp,exit_timestamp,entry_gap_usd,exit_gap_usd,cheap_exchange,expensive_exchange,position_size_btc,realized_pnl_btc,realized_pnl_usd,hold_duration_seconds,entry_price_cheap,entry_price_expensive,exit_price_long,exit_price_short,fees_entry,fees_exit,fees_total
+TRADE_001,2024-01-15T10:00:00Z,2024-01-15T10:05:00Z,150,30,lighter,nado,0.5,0.001,65,300,50000,50150,50030,50030,5,5,10
+TRADE_002,2024-01-15T14:30:00Z,2024-01-15T14:40:00Z,180,25,nado,lighter,0.5,0.0015,95,600,51000,51180,51025,51025,5,5,10
